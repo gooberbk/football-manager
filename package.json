@@ -1,0 +1,22 @@
+{
+  "name": "club-director",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter app dev",
+    "lint": "pnpm --filter app lint && pnpm --filter engine lint",
+    "test": "pnpm --filter engine test",
+    "test:watch": "pnpm --filter engine test:watch",
+    "test:coverage": "pnpm --filter engine test:coverage",
+    "clean": "rm -rf node_modules app/node_modules packages/*/node_modules"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "prettier": "^3.3.3",
+    "eslint": "^9.13.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
