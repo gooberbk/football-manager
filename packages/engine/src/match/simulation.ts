@@ -397,10 +397,10 @@ function simulatePhase(
 
   // Chance creation (increased for more goals)
   const attackVsDefense = attackingTeam.strength.attackRating / (attackingTeam.strength.attackRating + defendingTeam.strength.defenseRating);
-  const chanceChance = 0.285 + (attackVsDefense - 0.5) * 0.10;
+  const chanceChance = 0.308 + (attackVsDefense - 0.5) * 0.10; // Tuned for average goals and 6+ rate
 
   // Add randomness to chance creation to allow away team chances
-  const chanceVariation = 0.98 + rng.next() * 0.02;
+  const chanceVariation = 0.99 + rng.next() * 0.01; // Narrower variation to reduce high outliers
   const finalChanceChance = Math.min(0.425, chanceChance * chanceVariation);
 
   if (rng.nextBool(finalChanceChance)) {
@@ -534,7 +534,7 @@ function simulateChance(
   // Shot quality based on attacker attributes vs defense
   const shotQuality = (attacker.attributes.technical.shooting + attacker.attributes.technical.finishing) / 2;
   const defenseFactor = defenseRating / 100;
-  const onTargetChance = 0.63 + (shotQuality - 10) * 0.025 - defenseFactor * 0.08;
+  const onTargetChance = 0.488 + (shotQuality - 10) * 0.025 - defenseFactor * 0.08; // Reduced from 0.63 to lower 6+ goal rate
 
   if (rng.nextBool(Math.max(0.1, Math.min(0.9, onTargetChance)))) {
     result.shotsOnTarget++;

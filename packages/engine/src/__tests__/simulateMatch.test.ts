@@ -3,7 +3,7 @@ import { generateSeedData } from '../seed/generateSeedData';
 
 describe('simulateMatch - Legacy Compatibility', () => {
   it('should work with seed data generator', () => {
-    const seedData = generateSeedData();
+    const seedData = generateSeedData(12345);
     const clubs = seedData.clubs;
     const players = seedData.players;
 

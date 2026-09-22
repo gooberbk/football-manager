@@ -19,7 +19,7 @@ import {
 describe('Transfer Market', () => {
   describe('Player Valuation', () => {
     it('should value a 24-year-old higher than a near-identical 34-year-old', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const basePlayer = seedData.players[0];
 
       const youngPlayer: Player = {
@@ -47,7 +47,7 @@ describe('Transfer Market', () => {
     });
 
     it('should value a player with 1 month left on contract lower than identical player with 3 years', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const basePlayer = seedData.players[0];
 
       const shortContractPlayer: Player = {
@@ -73,7 +73,7 @@ describe('Transfer Market', () => {
     });
 
     it('should update player market value', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const player = seedData.players[0];
 
       const updatedPlayer = updatePlayerMarketValue(player);
@@ -85,7 +85,7 @@ describe('Transfer Market', () => {
 
   describe('Budget Enforcement', () => {
     it('should reject offers exceeding transfer budget', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const buyingClub = seedData.clubs[0];
       const sellingClub = seedData.clubs[1];
       const player = seedData.players.find((p) => p.contract.clubId === sellingClub.id);
@@ -111,7 +111,7 @@ describe('Transfer Market', () => {
     });
 
     it('should reject offers below 70% of market value', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const buyingClub = seedData.clubs[0];
       const sellingClub = seedData.clubs[1];
       const player = seedData.players.find((p) => p.contract.clubId === sellingClub.id);
@@ -141,7 +141,7 @@ describe('Transfer Market', () => {
 
   describe('Transfer Execution', () => {
     it('should correctly update buyer and seller finances and squads on accepted offer', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const buyingClub = seedData.clubs[0];
       const sellingClub = seedData.clubs[1];
       const player = seedData.players.find((p) => p.contract.clubId === sellingClub.id);
@@ -196,13 +196,13 @@ describe('Transfer Market', () => {
     });
 
     it('should enforce wage budget when buying multiple players in sequence', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const buyingClub = seedData.clubs[0];
       const sellingClubs = seedData.clubs.slice(1, 5);
       let players = [...seedData.players];
 
       // Set a higher wage budget to allow multiple transfers
-      buyingClub.finances.wageBudget = 2000000;
+      buyingClub.finances.wageBudget = 3000000;
       buyingClub.finances.transferBudget = 100000000;
 
       // Find 4 players from different selling clubs
@@ -267,7 +267,7 @@ describe('Transfer Market', () => {
 
   describe('AI Transfer Activity', () => {
     it('should process AI-to-AI transfers over 10-week window', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 8); // Use 8 clubs for testing
       const players = seedData.players;
 
@@ -292,7 +292,7 @@ describe('Transfer Market', () => {
     });
 
     it('should not allow two AI clubs to bid for the same player in the same week', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 6);
       const players = seedData.players;
 
@@ -331,7 +331,7 @@ describe('Transfer Market', () => {
     });
 
     it('should not allow negative club balances from AI transfers', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 6);
       const players = seedData.players;
 
@@ -349,7 +349,7 @@ describe('Transfer Market', () => {
 
   describe('Transfer Window', () => {
     it('should reject offers when transfer window is closed', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const buyingClub = seedData.clubs[0];
       const sellingClub = seedData.clubs[1];
       const player = seedData.players.find((p) => p.contract.clubId === sellingClub.id);
@@ -375,7 +375,7 @@ describe('Transfer Market', () => {
     });
 
     it('should not process AI transfers when window is closed', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 6);
       const players = seedData.players;
 
@@ -393,7 +393,7 @@ describe('Transfer Market', () => {
 
   describe('Offer Resolution', () => {
     it('should accept offers above acceptance threshold', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const sellingClub = seedData.clubs[1];
       const player = seedData.players[0];
 
@@ -415,7 +415,7 @@ describe('Transfer Market', () => {
     });
 
     it('should reject offers below acceptance threshold', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const sellingClub = seedData.clubs[1];
       const player = seedData.players[0];
 
@@ -437,7 +437,7 @@ describe('Transfer Market', () => {
     });
 
     it('should be more willing to sell when balance is low', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const player = seedData.players[0];
       const marketValue = calculateMarketValue(player);
 

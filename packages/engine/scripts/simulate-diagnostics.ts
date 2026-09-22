@@ -5,7 +5,7 @@ function runDiagnostics() {
   console.log('Running match simulation diagnostics...\n');
 
   // Generate two truly equal squads using the same club data
-  const seedData = generateSeedData();
+  const seedData = generateSeedData(12345);
 
   const homeClub = seedData.clubs[0];
   const awayClub = { ...seedData.clubs[0], id: 'away-club', name: 'Away FC' };

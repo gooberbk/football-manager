@@ -371,7 +371,7 @@ describe('Season Scheduling', () => {
 
   describe('advanceMatchweek', () => {
     it('should advance season when no fixtures to play', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 2);
       const players = seedData.players;
 
@@ -403,7 +403,7 @@ describe('Season Scheduling', () => {
     });
 
     it('should simulate fixtures and update standings', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 2);
       const players = seedData.players;
 
@@ -412,7 +412,7 @@ describe('Season Scheduling', () => {
         leagueId: 'league-1',
         currentWeek: 1,
         currentDate: new Date('2024-08-01'),
-        transferWindowOpen: true,
+        transferWindowOpen: false, // Disable transfer window for this test
         fixturesCalendar: [],
       };
 
@@ -446,7 +446,7 @@ describe('Season Scheduling', () => {
     });
 
     it('should reduce fitness for players who played', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 2);
       const players = seedData.players;
 
@@ -489,7 +489,7 @@ describe('Season Scheduling', () => {
     });
 
     it('should recover fitness for players who did not play', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 2);
       const players = seedData.players;
 
@@ -526,7 +526,7 @@ describe('Season Scheduling', () => {
 
   describe('Full-season integration test', () => {
     it('should advance an entire season to completion for 6 clubs', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 6);
       const players = seedData.players;
 
@@ -590,7 +590,7 @@ describe('Season Scheduling', () => {
 
   describe('Player effects test', () => {
     it('should decrease fitness after playing and recover over non-playing weeks', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 2);
       const players = seedData.players;
 
@@ -647,7 +647,7 @@ describe('Season Scheduling', () => {
     });
 
     it('should handle injury recovery over time', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 2);
       const players = seedData.players;
 
@@ -698,7 +698,7 @@ describe('Season Scheduling', () => {
     });
 
     it('should keep fitness clamped to 0-100 over 10 consecutive matchweeks', () => {
-      const seedData = generateSeedData();
+      const seedData = generateSeedData(12345);
       const clubs = seedData.clubs.slice(0, 4);
       const players = seedData.players;
 

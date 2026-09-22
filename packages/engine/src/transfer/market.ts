@@ -227,7 +227,7 @@ export function executeTransfer(
 /**
  * Calculate the total wage bill for a club.
  */
-function calculateWageBill(club: Club, allPlayers: Player[]): number {
+export function calculateWageBill(club: Club, allPlayers: Player[]): number {
   return club.squad.reduce((total, playerId) => {
     const player = allPlayers.find((p) => p.id === playerId);
     return total + (player?.contract.wage || 0);

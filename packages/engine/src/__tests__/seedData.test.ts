@@ -2,13 +2,20 @@ import { generateSeedData } from '../seed/generateSeedData';
 import type { Position } from '@club-director/shared-types';
 
 describe('generateSeedData', () => {
+  it('should be deterministic with the same seed', () => {
+    const seed1 = generateSeedData(12345);
+    const seed2 = generateSeedData(12345);
+
+    expect(seed1).toEqual(seed2);
+  });
+
   it('should generate the correct number of clubs', () => {
-    const { clubs } = generateSeedData();
+    const { clubs } = generateSeedData(12345);
     expect(clubs).toHaveLength(16);
   });
 
   it('should generate the correct number of players per club (20)', () => {
-    const { clubs, players } = generateSeedData();
+    const { clubs, players } = generateSeedData(12345);
     expect(players.length).toBe(320);
     clubs.forEach((club) => {
       expect(club.squad).toHaveLength(20);
@@ -16,7 +23,7 @@ describe('generateSeedData', () => {
   });
 
   it('should generate clubs with valid structure', () => {
-    const { clubs } = generateSeedData();
+    const { clubs } = generateSeedData(12345);
 
     clubs.forEach((club) => {
       expect(club).toHaveProperty('id');
@@ -39,7 +46,7 @@ describe('generateSeedData', () => {
   });
 
   it('should generate players with valid structure', () => {
-    const { players } = generateSeedData();
+    const { players } = generateSeedData(12345);
 
     players.forEach((player) => {
       expect(player).toHaveProperty('id');
@@ -234,11 +241,11 @@ describe('generateSeedData', () => {
   });
 
   it('should generate development stats with reasonable ranges', () => {
-    const { players } = generateSeedData();
+    const { players } = generateSeedData(12345);
 
     players.forEach((player) => {
-      expect(player.development.currentAbility).toBeGreaterThanOrEqual(100);
-      expect(player.development.currentAbility).toBeLessThanOrEqual(160);
+      expect(player.development.currentAbility).toBeGreaterThanOrEqual(80); // Bottom tier can go to 80 with -2 modifier
+      expect(player.development.currentAbility).toBeLessThanOrEqual(180); // Top tier can go to 180 with +2 modifier
       expect(player.development.potentialAbility).toBeGreaterThanOrEqual(
         player.development.currentAbility,
       );

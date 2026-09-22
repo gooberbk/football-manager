@@ -8,7 +8,7 @@ describe('simulateMatch', () => {
   let playerMap: any;
 
   beforeEach(() => {
-    const seedData = generateSeedData();
+    const seedData = generateSeedData(12345);
     clubs = seedData.clubs;
     players = seedData.players;
     playerMap = {};

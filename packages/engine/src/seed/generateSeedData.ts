@@ -13,6 +13,7 @@ import type {
   Mentality,
   Formation,
 } from '@club-director/shared-types';
+import { SeededRNG } from '../match/simulation';
 
 const FIRST_NAMES = [
   'Alex',
@@ -81,17 +82,20 @@ const CLUB_NAMES = [
   { name: 'Bridgeport United', nickname: 'The Irons', founded: 1911 },
 ];
 
-function randomInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+function randomInt(min: number, max: number, rng: SeededRNG): number {
+  return rng.nextInt(min, max + 1);
 }
 
-function randomChoice<T>(array: T[]): T {
-  return array[Math.floor(Math.random() * array.length)];
+function randomChoice<T>(array: T[], rng: SeededRNG): T {
+  return rng.nextChoice(array);
 }
 
-function generatePlayerAttributes(position: Position, strengthModifier: number = 0): PlayerAttributes {
-  const base = randomInt(8, 14) + strengthModifier;
-  const variance = () => randomInt(-3, 3);
+function generatePlayerAttributes(position: Position, strengthModifier: number = 0, rng: SeededRNG): PlayerAttributes {
+  // Apply strength modifier to the base range, not as a post-roll addition
+  const baseMin = 8 + strengthModifier;
+  const baseMax = 14 + strengthModifier;
+  const base = randomInt(baseMin, baseMax, rng);
+  const variance = () => randomInt(-3, 3, rng);
 
   const technical = {
     passing: base + variance(),
@@ -245,44 +249,46 @@ function generatePlayer(
   position: Position,
   preferredPositions: Position[],
   strengthModifier: number = 0,
+  rng: SeededRNG,
+  baseDate: number,
 ): Player {
-  const age = randomInt(18, 35);
-  const attributes = generatePlayerAttributes(position, strengthModifier);
+  const age = randomInt(18, 35, rng);
+  const attributes = generatePlayerAttributes(position, strengthModifier, rng);
 
-  const currentAbility = randomInt(100, 160) + strengthModifier * 10;
+  const currentAbility = randomInt(100, 160, rng) + strengthModifier * 10;
   const development: PlayerDevelopment = {
     currentAbility,
-    potentialAbility: randomInt(currentAbility, 200),
-    ageGrowthCurve: randomChoice<AgeGrowthCurve>(['early-peak', 'normal', 'late-bloomer']),
+    potentialAbility: randomInt(currentAbility, 200, rng),
+    ageGrowthCurve: randomChoice<AgeGrowthCurve>(['early-peak', 'normal', 'late-bloomer'], rng),
   };
 
   const status: PlayerStatus = {
-    morale: randomInt(50, 100),
-    recentForm: Array.from({ length: 5 }, () => randomInt(4, 10)),
-    fitness: randomInt(70, 100),
-    injury: Math.random() > 0.9
+    morale: randomInt(50, 100, rng),
+    recentForm: Array.from({ length: 5 }, () => randomInt(4, 10, rng)),
+    fitness: randomInt(70, 100, rng),
+    injury: rng.next() > 0.9
       ? {
           type: 'Hamstring Strain',
-          daysRemaining: randomInt(7, 30),
-          severity: randomChoice<InjurySeverity>(['minor', 'moderate', 'serious', 'severe']),
+          daysRemaining: randomInt(7, 30, rng),
+          severity: randomChoice<InjurySeverity>(['minor', 'moderate', 'serious', 'severe'], rng),
         }
       : null,
   };
 
   const contract: PlayerContract = {
     clubId,
-    wage: randomInt(5000, 100000),
-    contractExpiryDate: new Date(Date.now() + randomInt(180, 1825) * 24 * 60 * 60 * 1000),
-    marketValue: randomInt(100000, 50000000),
+    wage: randomInt(5000, 100000, rng),
+    contractExpiryDate: new Date(baseDate + randomInt(180, 1825, rng) * 24 * 60 * 60 * 1000),
+    marketValue: randomInt(100000, 50000000, rng),
   };
 
   return {
     id,
-    firstName: randomChoice(FIRST_NAMES),
-    lastName: randomChoice(LAST_NAMES),
-    nationality: randomChoice(NATIONALITIES),
+    firstName: randomChoice(FIRST_NAMES, rng),
+    lastName: randomChoice(LAST_NAMES, rng),
+    nationality: randomChoice(NATIONALITIES, rng),
     age,
-    preferredFoot: randomChoice<PreferredFoot>(['left', 'right', 'both']),
+    preferredFoot: randomChoice<PreferredFoot>(['left', 'right', 'both'], rng),
     primaryPosition: position,
     secondaryPositions: preferredPositions,
     attributes,
@@ -292,7 +298,7 @@ function generatePlayer(
   };
 }
 
-function generateSquad(clubId: string, squadNumber: number, strengthModifier: number = 0): Player[] {
+function generateSquad(clubId: string, squadNumber: number, strengthModifier: number = 0, rng: SeededRNG, baseDate: number): Player[] {
   const players: Player[] = [];
   let playerIndex = 0;
 
@@ -305,6 +311,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
         'GK',
         [],
         strengthModifier,
+        rng,
+        baseDate,
       ),
     );
   }
@@ -318,6 +326,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
         'CB',
         ['FB'],
         strengthModifier,
+        rng,
+        baseDate,
       ),
     );
   }
@@ -331,6 +341,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
         'FB',
         ['CB'],
         strengthModifier,
+        rng,
+        baseDate,
       ),
     );
   }
@@ -344,6 +356,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
         'DM',
         ['CM'],
         strengthModifier,
+        rng,
+        baseDate,
       ),
     );
   }
@@ -357,6 +371,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
         'CM',
         ['DM', 'AM'],
         strengthModifier,
+        rng,
+        baseDate,
       ),
     );
   }
@@ -369,6 +385,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
       'AM',
       ['CM', 'W'],
       strengthModifier,
+      rng,
+      baseDate,
     ),
   );
 
@@ -381,6 +399,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
         'W',
         ['AM', 'ST'],
         strengthModifier,
+        rng,
+        baseDate,
       ),
     );
   }
@@ -394,6 +414,8 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
         'ST',
         ['W', 'AM'],
         strengthModifier,
+        rng,
+        baseDate,
       ),
     );
   }
@@ -401,7 +423,7 @@ function generateSquad(clubId: string, squadNumber: number, strengthModifier: nu
   return players;
 }
 
-function generateClub(index: number): Club {
+function generateClub(index: number, rng: SeededRNG): Club {
   const clubInfo = CLUB_NAMES[index];
   const clubId = `club-${index}`;
 
@@ -415,14 +437,12 @@ function generateClub(index: number): Club {
   }
   // Middle clubs have 0 modifier
 
-  const squad = generateSquad(clubId, index, strengthModifier);
-
   const tactics: ClubTactics = {
-    defaultFormation: randomChoice<Formation>(['4-4-2', '4-3-3', '4-2-3-1', '3-5-2']),
-    mentality: randomChoice<Mentality>(['defensive', 'balanced', 'attacking']),
-    pressingIntensity: randomInt(5, 15),
-    tempo: randomInt(5, 15),
-    width: randomInt(5, 15),
+    defaultFormation: randomChoice<Formation>(['4-4-2', '4-3-3', '4-2-3-1', '3-5-2'], rng),
+    mentality: randomChoice<Mentality>(['defensive', 'balanced', 'attacking'], rng),
+    pressingIntensity: randomInt(5, 15, rng),
+    tempo: randomInt(5, 15, rng),
+    width: randomInt(5, 15, rng),
   };
 
   // Adjust finances based on strength
@@ -436,32 +456,45 @@ function generateClub(index: number): Club {
     name: clubInfo.name,
     nickname: clubInfo.nickname,
     foundedYear: clubInfo.founded,
-    reputation: randomInt(55 + strengthModifier * 5, 85 + strengthModifier * 10),
+    reputation: randomInt(55 + strengthModifier * 5, 85 + strengthModifier * 10, rng),
     finances: {
-      balance: randomInt(baseBalance - 10000000, baseBalance + 20000000),
-      transferBudget: randomInt(baseTransferBudget - 5000000, baseTransferBudget + 10000000),
-      wageBudget: randomInt(baseWageBudget - 100000, baseWageBudget + 200000),
-      weeklyIncome: randomInt(baseWeeklyIncome - 200000, baseWeeklyIncome + 500000),
+      balance: randomInt(baseBalance - 10000000, baseBalance + 20000000, rng),
+      transferBudget: randomInt(baseTransferBudget - 5000000, baseTransferBudget + 10000000, rng),
+      wageBudget: randomInt(baseWageBudget - 100000, baseWageBudget + 200000, rng),
+      weeklyIncome: randomInt(baseWeeklyIncome - 200000, baseWeeklyIncome + 500000, rng),
     },
-    squad: squad.map((p) => p.id),
+    squad: [], // Will be populated after squad generation
     stadium: {
       name: `${clubInfo.name} Stadium`,
-      capacity: randomInt(30000 + strengthModifier * 10000, 60000 + strengthModifier * 15000),
+      capacity: randomInt(30000 + strengthModifier * 10000, 60000 + strengthModifier * 15000, rng),
     },
     tactics,
   };
 }
 
-export function generateSeedData(): { clubs: Club[]; players: Player[] } {
+export function generateSeedData(seed: number = Date.now()): { clubs: Club[]; players: Player[] } {
+  const rng = new SeededRNG(seed);
+  const baseDate = new Date('2024-01-01').getTime(); // Fixed base date for determinism
   const clubs: Club[] = [];
   const players: Player[] = [];
 
   for (let i = 0; i < CLUB_NAMES.length; i++) {
-    const club = generateClub(i);
+    const club = generateClub(i, rng);
     clubs.push(club);
 
-    const squad = generateSquad(club.id, i);
+    // Calculate strength modifier for squad generation
+    let strengthModifier = 0;
+    if (i < 4) {
+      strengthModifier = 2;
+    } else if (i >= 12) {
+      strengthModifier = -2;
+    }
+
+    const squad = generateSquad(club.id, i, strengthModifier, rng, baseDate);
     players.push(...squad);
+
+    // Update club's squad reference
+    clubs[i].squad = squad.map((p) => p.id);
   }
 
   return { clubs, players };
