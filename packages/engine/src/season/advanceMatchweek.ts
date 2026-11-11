@@ -6,6 +6,8 @@ import {
   Player,
   PlayerMap,
   Season,
+  TransferOffer,
+  TransferRecord,
 } from '@club-director/shared-types';
 import { simulateMatch } from '../match/simulation';
 import { computeStandings } from './standings';
@@ -26,7 +28,13 @@ export interface MatchweekAdvancement {
   updatedSeason: Season;
   updatedPlayers: Player[];
   updatedClubs: Club[];
-  transferOffers: any[];
+  transferOffers: TransferOffer[];
+  transferRecords: TransferRecord[];
+}
+
+export interface AdvanceMatchweekOptions {
+  /** Club that must not participate as an AI buyer (the managed club). */
+  managedClubId?: string;
 }
 
 /**
@@ -39,6 +47,7 @@ export function advanceMatchweek(
   league: League,
   clubs: Club[],
   players: Player[],
+  options?: AdvanceMatchweekOptions,
 ): MatchweekAdvancement {
   const currentWeek = season.currentWeek;
   const weekFixtures = league.fixtures.filter((f) => f.week === currentWeek && !f.played);
@@ -53,6 +62,7 @@ export function advanceMatchweek(
       updatedPlayers: applyNonPlayingEffects(players),
       updatedClubs: clubs,
       transferOffers: [],
+      transferRecords: [],
     };
   }
 
@@ -133,12 +143,18 @@ export function advanceMatchweek(
   // Apply post-match effects to players
   const updatedPlayers = applyPostMatchEffects(players, results, clubs);
 
-  // Process AI transfer activity
+  // Process AI transfer activity on a copy of the clubs array (the engine
+  // mutates it in place for accepted transfers), so callers' arrays are not
+  // modified outside of the returned state.
+  const transferClubs = [...clubs];
+  const transferRecords: TransferRecord[] = [];
   const transferOffers = processAITransferActivity(
-    clubs,
+    transferClubs,
     updatedPlayers,
     [],
     season.transferWindowOpen,
+    options?.managedClubId ? [options.managedClubId] : [],
+    transferRecords,
   );
 
   // Advance season
@@ -149,8 +165,9 @@ export function advanceMatchweek(
     updatedLeague,
     updatedSeason,
     updatedPlayers,
-    updatedClubs: clubs,
+    updatedClubs: transferClubs,
     transferOffers,
+    transferRecords,
   };
 }
 
@@ -164,9 +181,17 @@ function applyPostMatchEffects(
 ): Player[] {
   const updatedPlayers = new Map<string, Player>();
 
-  // Initialize with all players
+  // Initialize with all players (deep-copy status so post-match effects
+  // never mutate the caller's player objects)
   players.forEach((p) => {
-    updatedPlayers.set(p.id, { ...p });
+    updatedPlayers.set(p.id, {
+      ...p,
+      status: {
+        ...p.status,
+        recentForm: [...p.status.recentForm],
+        injury: p.status.injury ? { ...p.status.injury } : null,
+      },
+    });
   });
 
   // Process each match result
@@ -245,7 +270,14 @@ function applyPostMatchEffects(
  */
 function applyNonPlayingEffects(players: Player[]): Player[] {
   return players.map((player) => {
-    const updatedPlayer = { ...player };
+    const updatedPlayer: Player = {
+      ...player,
+      status: {
+        ...player.status,
+        recentForm: [...player.status.recentForm],
+        injury: player.status.injury ? { ...player.status.injury } : null,
+      },
+    };
 
     // Fitness recovery
     updatedPlayer.status.fitness = Math.min(100, updatedPlayer.status.fitness + 10);

@@ -237,12 +237,25 @@ export function calculateWageBill(club: Club, allPlayers: Player[]): number {
 /**
  * Process AI-to-AI transfer activity during a matchweek.
  * Each AI club has a chance to evaluate and make offers.
+ *
+ * Accepted offers are genuinely executed: the buying/selling clubs' finances
+ * and squads, the player's contract, and (when provided) the transfer history
+ * are updated. The `clubs` and `players` arrays are mutated in place so
+ * callers observe the post-transfer state.
+ *
+ * @param excludedClubIds clubs that must not participate in AI transfers at
+ *                        all (e.g. the human-managed club): they neither buy
+ *                        nor have players auto-sold
+ * @param transferHistory optional array that completed TransferRecords are
+ *                        appended to
  */
 export function processAITransferActivity(
   clubs: Club[],
   players: Player[],
   existingOffers: TransferOffer[],
   transferWindowOpen: boolean,
+  excludedClubIds: string[] = [],
+  transferHistory?: TransferRecord[],
 ): TransferOffer[] {
   if (!transferWindowOpen) {
     return existingOffers;
@@ -250,6 +263,7 @@ export function processAITransferActivity(
 
   const newOffers: TransferOffer[] = [...existingOffers];
   const transferredPlayerIds = new Set<string>();
+  const excluded = new Set(excludedClubIds);
 
   // Track players already transferred from accepted offers
   existingOffers.forEach((offer) => {
@@ -259,20 +273,28 @@ export function processAITransferActivity(
   });
 
   // Each AI club has ~15% chance to attempt a transfer
-  clubs.forEach((buyingClub) => {
+  for (const club of clubs) {
+    // Always work from the latest in-place state (earlier transfers this
+    // run may have replaced this club's object).
+    const buyingClub = clubs.find((c) => c.id === club.id) ?? club;
+
+    if (excluded.has(buyingClub.id)) {
+      continue; // Managed club never participates as an AI buyer
+    }
+
     if (Math.random() > 0.15) {
-      return; // Skip this club
+      continue; // Skip this club
     }
 
     // Check if club has budget
     if (buyingClub.finances.transferBudget < 1000000) {
-      return; // Not enough budget
+      continue; // Not enough budget
     }
 
     // Find weak position in squad
     const weakPosition = findWeakPosition(buyingClub, players);
     if (!weakPosition) {
-      return;
+      continue;
     }
 
     // Find suitable player from another club
@@ -285,17 +307,23 @@ export function processAITransferActivity(
     );
 
     if (!targetPlayer) {
-      return;
+      continue;
     }
 
     // Check if player has already been transferred
     if (transferredPlayerIds.has(targetPlayer.id)) {
-      return;
+      continue;
     }
 
     const sellingClub = clubs.find((c) => c.id === targetPlayer.contract.clubId);
-    if (!sellingClub || sellingClub.id === buyingClub.id) {
-      return;
+    if (
+      !sellingClub ||
+      sellingClub.id === buyingClub.id ||
+      excluded.has(sellingClub.id)
+    ) {
+      // The managed club never sells players through automated AI resolution;
+      // the user must decide those transfers manually.
+      continue;
     }
 
     // Make offer at market value
@@ -311,38 +339,64 @@ export function processAITransferActivity(
       true,
     );
 
-    if (result.success && result.offer) {
-      // For AI-to-AI, resolve immediately
-      const resolution = resolveOffer(result.offer, sellingClub, marketValue);
-      if (resolution === 'accepted') {
-        // Mark player as transferred
-        transferredPlayerIds.add(targetPlayer.id);
-
-        // Execute transfer
-        const transferResult = executeTransfer(
-          result.offer,
-          buyingClub,
-          sellingClub,
-          targetPlayer,
-          players,
-          [],
-        );
-
-        if (transferResult) {
-          // Update clubs and players in place (this would normally be handled by the caller)
-          // For now, just add the accepted offer
-          const acceptedOffer: TransferOffer = {
-            ...result.offer,
-            status: 'accepted',
-            resolvedAt: new Date(),
-          };
-          newOffers.push(acceptedOffer);
-        }
-      } else {
-        newOffers.push(result.offer);
-      }
+    if (!result.success || !result.offer) {
+      continue;
     }
-  });
+
+    // For AI-to-AI, resolve immediately
+    const resolution = resolveOffer(result.offer, sellingClub, marketValue);
+
+    if (resolution !== 'accepted') {
+      // Record the truthful outcome: the offer was resolved and rejected,
+      // not left pending.
+      newOffers.push({
+        ...result.offer,
+        status: 'rejected',
+        resolvedAt: new Date(),
+      });
+      continue;
+    }
+
+    // Execute the transfer for real and apply the returned state.
+    const transferResult = executeTransfer(
+      result.offer,
+      buyingClub,
+      sellingClub,
+      targetPlayer,
+      players,
+      transferHistory,
+    );
+
+    if (!transferResult) {
+      // Execution failed (e.g. wage budget) - do not record an accepted
+      // offer and leave game state untouched.
+      continue;
+    }
+
+    const buyerIndex = clubs.findIndex((c) => c.id === transferResult.updatedBuyingClub.id);
+    if (buyerIndex !== -1) {
+      clubs[buyerIndex] = transferResult.updatedBuyingClub;
+    }
+    const sellerIndex = clubs.findIndex((c) => c.id === transferResult.updatedSellingClub.id);
+    if (sellerIndex !== -1) {
+      clubs[sellerIndex] = transferResult.updatedSellingClub;
+    }
+    const playerIndex = players.findIndex((p) => p.id === transferResult.updatedPlayer.id);
+    if (playerIndex !== -1) {
+      players[playerIndex] = transferResult.updatedPlayer;
+    }
+    if (transferHistory) {
+      transferHistory.push(transferResult.transferRecord);
+    }
+
+    transferredPlayerIds.add(targetPlayer.id);
+
+    newOffers.push({
+      ...result.offer,
+      status: 'accepted',
+      resolvedAt: new Date(),
+    });
+  }
 
   return newOffers;
 }

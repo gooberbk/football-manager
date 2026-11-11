@@ -495,6 +495,13 @@ export function generateSeedData(seed: number = Date.now()): { clubs: Club[]; pl
 
     // Update club's squad reference
     clubs[i].squad = squad.map((p) => p.id);
+
+    // Set the wage budget from the actual squad wage bill so that the
+    // engine's wage-affordability check in executeTransfer() can succeed.
+    // The previous fixed budgets were smaller than the wage bill itself,
+    // which made every transfer execution fail.
+    const wageBill = squad.reduce((total, p) => total + p.contract.wage, 0);
+    clubs[i].finances.wageBudget = Math.round((wageBill * 1.5) / 10000) * 10000;
   }
 
   return { clubs, players };
