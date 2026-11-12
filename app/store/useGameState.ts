@@ -12,6 +12,14 @@ interface GameState {
   transferHistory: TransferRecord[];
   managedClubId: string | null;
   isLoading: boolean;
+  /**
+   * Career boot lifecycle, written by services/careerBoot.ts:
+   * 'pending' while boot runs, 'loaded'/'empty' on success, 'error' on
+   * failure. 'error' must never be treated as "no career" — it is a
+   * recoverable failure surfaced by the root gate and tab guard.
+   */
+  bootStatus: 'pending' | 'loaded' | 'empty' | 'error';
+  setBootStatus: (status: 'pending' | 'loaded' | 'empty' | 'error') => void;
   setLeague: (league: League) => void;
   setSeason: (season: Season) => void;
   setClubs: (clubs: Club[]) => void;
@@ -36,6 +44,8 @@ export const useGameState = create<GameState>((set, get) => ({
   transferHistory: [],
   managedClubId: null,
   isLoading: true,
+  bootStatus: 'pending',
+  setBootStatus: (status) => set({ bootStatus: status }),
   setLeague: (league) => set({ league }),
   setSeason: (season) => set({ season }),
   setClubs: (clubs) => set({ clubs }),
@@ -58,7 +68,7 @@ export const useGameState = create<GameState>((set, get) => ({
     isLoading: true,
   }),
   saveState: async () => {
-    const { league, season, clubs, players, transferHistory, managedClubId, isLoading } = get();
+    const { league, season, clubs, players, transferHistory, transferOffers, managedClubId, isLoading } = get();
     if (league && season && clubs.length > 0 && players.length > 0 && managedClubId && !isLoading) {
       try {
         const careerState = {
@@ -75,6 +85,7 @@ export const useGameState = create<GameState>((set, get) => ({
           league,
           season,
           transferHistory,
+          transferOffers,
         };
         await saveCareer(careerState);
       } catch (error) {

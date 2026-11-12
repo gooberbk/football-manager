@@ -6,10 +6,64 @@ import type {
   League,
   Season,
   TransferRecord,
+  TransferOffer,
   StandingEntry,
 } from '@club-director/shared-types';
 import { saveCareer, loadCareer, deleteCareer } from './careerPersistence';
 import { getTestDatabase, resetTestDatabase } from './testDatabase';
+import * as schema from './schema';
+
+const buildState = () => {
+  const seedData = generateSeedData(777);
+  const clubs = seedData.clubs.slice(0, 3);
+  const players = seedData.players.filter((p) =>
+    clubs.some((c) => c.squad.includes(p.id)),
+  );
+  return {
+    career: {
+      id: 'active',
+      managerName: 'Offer Manager',
+      managedClubId: clubs[0].id,
+      createdAt: new Date('2024-08-01'),
+      lastPlayedAt: new Date(),
+      schemaVersion: 1,
+    },
+    clubs,
+    players,
+    league: {
+      id: 'league-1',
+      name: 'Offer League',
+      tier: 1,
+      clubIds: clubs.map((c) => c.id),
+      standings: { entries: [] },
+      fixtures: [],
+    },
+    season: {
+      id: 'season-1',
+      leagueId: 'league-1',
+      currentWeek: 1,
+      currentDate: new Date('2024-08-01'),
+      transferWindowOpen: true,
+      fixturesCalendar: [],
+    },
+    transferHistory: [],
+    transferOffers: [] as TransferOffer[],
+  };
+};
+
+const makeOffer = (
+  state: ReturnType<typeof buildState>,
+  overrides: Partial<TransferOffer>,
+): TransferOffer => ({
+  id: 'offer-x',
+  playerId: state.players[0].id,
+  buyingClubId: state.clubs[1].id,
+  sellingClubId: state.clubs[0].id,
+  offerAmount: 500_000,
+  status: 'pending',
+  createdAt: new Date('2024-08-10T12:00:00Z'),
+  ...overrides,
+});
 
 describe('Career Persistence (Real SQLite)', () => {
   let testDb: any;
@@ -83,6 +137,7 @@ describe('Career Persistence (Real SQLite)', () => {
       league,
       season,
       transferHistory,
+      transferOffers: [],
     };
 
     // Call the real saveCareer() against the test SQLite instance
@@ -205,6 +260,7 @@ describe('Career Persistence (Real SQLite)', () => {
       league,
       season,
       transferHistory: [],
+      transferOffers: [],
     };
 
     // Save initial state
@@ -343,6 +399,7 @@ describe('Career Persistence (Real SQLite)', () => {
       league,
       season,
       transferHistory,
+      transferOffers: [],
     };
 
     // Save with transfer
@@ -406,6 +463,7 @@ describe('Career Persistence (Real SQLite)', () => {
         fixturesCalendar: [],
       },
       transferHistory: [],
+      transferOffers: [],
     };
 
     await saveCareer(careerState1, testDb);
@@ -443,6 +501,7 @@ describe('Career Persistence (Real SQLite)', () => {
         fixturesCalendar: [],
       },
       transferHistory: [],
+      transferOffers: [],
     };
 
     await saveCareer(careerState2, testDb);
@@ -459,5 +518,453 @@ describe('Career Persistence (Real SQLite)', () => {
     // Assert career state represents the second seed data
     expect(loaded!.career.managerName).not.toBe(careerState1.career.managerName);
     expect(loaded!.league.name).not.toBe(careerState1.league.name);
+  });
+
+  it('should roll back the entire save when a write fails mid-transaction', async () => {
+    const snapshotAll = async () => ({
+      career: await testDb.select().from(schema.career),
+      clubs: await testDb.select().from(schema.clubs),
+      players: await testDb.select().from(schema.players),
+      leagues: await testDb.select().from(schema.leagues),
+      leagueStandings: await testDb.select().from(schema.leagueStandings),
+      fixtures: await testDb.select().from(schema.fixtures),
+      seasons: await testDb.select().from(schema.seasons),
+      matches: await testDb.select().from(schema.matches),
+      matchEvents: await testDb.select().from(schema.matchEvents),
+      transfers: await testDb.select().from(schema.transfers),
+      transferOffers: await testDb.select().from(schema.transferOffers),
+    });
+
+    const buildCareerState = (
+      managerName: string,
+      leagueName: string,
+      seed: number,
+    ) => {
+      const seedData = generateSeedData(seed);
+      const clubs = seedData.clubs.slice(0, 2);
+      const players = seedData.players.filter((p) =>
+        clubs.some((c) => c.squad.includes(p.id)),
+      );
+      return {
+        career: {
+          id: 'active',
+          managerName,
+          managedClubId: clubs[0].id,
+          createdAt: new Date('2024-08-01'),
+          lastPlayedAt: new Date(),
+          schemaVersion: 1,
+        },
+        clubs,
+        players,
+        league: {
+          id: 'league-1',
+          name: leagueName,
+          tier: 1,
+          clubIds: clubs.map((c) => c.id),
+          standings: { entries: [] },
+          fixtures: [],
+        },
+        season: {
+          id: 'season-1',
+          leagueId: 'league-1',
+          currentWeek: 1,
+          currentDate: new Date('2024-08-01'),
+          transferWindowOpen: true,
+          fixturesCalendar: [],
+        },
+        transferHistory: [],
+        transferOffers: [],
+      };
+    };
+
+    // 1. Save a valid career.
+    const careerA = buildCareerState('Manager One', 'League One', 12345);
+    await saveCareer(careerA, testDb);
+
+    // 2. Capture the complete persisted state.
+    const beforeSnapshot = await snapshotAll();
+    expect(beforeSnapshot.career).toHaveLength(1);
+    expect(beforeSnapshot.players.length).toBeGreaterThan(0);
+
+    // 3. Attempt a second save that fails AFTER the career upsert, all
+    //    deletes, and the club inserts have already executed: a player with
+    //    a null firstName violates the NOT NULL constraint during the
+    //    players insert phase.
+    const careerB = buildCareerState('Manager Two', 'League Two', 99999);
+    careerB.players[0] = { ...careerB.players[0], firstName: null as any };
+
+    await expect(saveCareer(careerB, testDb)).rejects.toThrow();
+
+    // 4. Every persisted row must be identical to the pre-failure state.
+    const afterSnapshot = await snapshotAll();
+    expect(afterSnapshot).toEqual(beforeSnapshot);
+
+    // 5. The original career must still load correctly.
+    const loaded = await loadCareer(testDb);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.career.managerName).toBe('Manager One');
+    expect(loaded!.league.name).toBe('League One');
+    expect(loaded!.players.length).toBe(careerA.players.length);
+    expect(loaded!.clubs.length).toBe(careerA.clubs.length);
+  });
+
+  describe('transfer offer persistence', () => {
+    it('round-trips a pending offer with null resolvedAt', async () => {
+      const state = buildState();
+      const offer = makeOffer(state, { id: 'offer-pending' });
+      await saveCareer({ ...state, transferOffers: [offer] }, testDb);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.transferOffers).toHaveLength(1);
+      const loadedOffer = loaded!.transferOffers![0];
+      expect(loadedOffer).toEqual({
+        id: 'offer-pending',
+        playerId: offer.playerId,
+        buyingClubId: offer.buyingClubId,
+        sellingClubId: offer.sellingClubId,
+        offerAmount: 500_000,
+        status: 'pending',
+        createdAt: offer.createdAt,
+        resolvedAt: undefined,
+      });
+      expect(loadedOffer.createdAt).toBeInstanceOf(Date);
+    });
+
+    it('round-trips accepted, rejected and withdrawn offers with resolvedAt', async () => {
+      const state = buildState();
+      const resolvedAt = new Date('2024-08-20T09:30:00Z');
+      const offers: TransferOffer[] = (
+        ['accepted', 'rejected', 'withdrawn'] as const
+      ).map((status, i) =>
+        makeOffer(state, {
+          id: `offer-${status}`,
+          status,
+          offerAmount: 100_000 * (i + 1),
+          resolvedAt,
+        }),
+      );
+      await saveCareer({ ...state, transferOffers: offers }, testDb);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.transferOffers).toHaveLength(3);
+      for (const status of ['accepted', 'rejected', 'withdrawn'] as const) {
+        const found = loaded!.transferOffers!.find((o) => o.id === `offer-${status}`);
+        expect(found).toBeDefined();
+        expect(found!.status).toBe(status);
+        expect(found!.resolvedAt).toEqual(resolvedAt);
+        expect(found!.resolvedAt).toBeInstanceOf(Date);
+      }
+    });
+
+    it('preserves multiple simultaneous offers including AI-to-AI offers', async () => {
+      const state = buildState();
+      // managedClubId is clubs[0]; offers between clubs[1] and clubs[2] are
+      // AI-to-AI and must persist just like user-facing offers.
+      const offers: TransferOffer[] = [
+        makeOffer(state, {
+          id: 'offer-user',
+          buyingClubId: state.clubs[1].id,
+          sellingClubId: state.clubs[0].id,
+          playerId: state.players[0].id,
+        }),
+        makeOffer(state, {
+          id: 'offer-ai-1',
+          buyingClubId: state.clubs[1].id,
+          sellingClubId: state.clubs[2].id,
+          playerId: state.players[1].id,
+          offerAmount: 250_000,
+        }),
+        makeOffer(state, {
+          id: 'offer-ai-2',
+          buyingClubId: state.clubs[2].id,
+          sellingClubId: state.clubs[1].id,
+          playerId: state.players[2].id,
+          status: 'accepted',
+          offerAmount: 750_000,
+          resolvedAt: new Date('2024-08-18'),
+        }),
+      ];
+      await saveCareer({ ...state, transferOffers: offers }, testDb);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.transferOffers).toHaveLength(3);
+      const ids = loaded!.transferOffers!.map((o) => o.id).sort();
+      expect(ids).toEqual(['offer-ai-1', 'offer-ai-2', 'offer-user']);
+      const ai1 = loaded!.transferOffers!.find((o) => o.id === 'offer-ai-1')!;
+      expect(ai1.sellingClubId).toBe(state.clubs[2].id);
+      expect(ai1.status).toBe('pending');
+    });
+
+    it('loads an empty offer collection as an empty array', async () => {
+      const state = buildState();
+      await saveCareer(state, testDb); // transferOffers omitted entirely
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.transferOffers).toEqual([]);
+    });
+
+    it('saving twice replaces offers without duplicates', async () => {
+      const state = buildState();
+      const offerA = makeOffer(state, { id: 'offer-a' });
+      await saveCareer({ ...state, transferOffers: [offerA] }, testDb);
+
+      // Second save: offer A withdrawn, offer B added.
+      const offerB = makeOffer(state, {
+        id: 'offer-b',
+        status: 'accepted',
+        resolvedAt: new Date('2024-08-25'),
+      });
+      const offerAWithdrawn = {
+        ...offerA,
+        status: 'withdrawn' as const,
+        resolvedAt: new Date('2024-08-22'),
+      };
+      await saveCareer(
+        { ...state, transferOffers: [offerAWithdrawn, offerB] },
+        testDb,
+      );
+
+      const rows = await testDb.select().from(schema.transferOffers);
+      expect(rows).toHaveLength(2);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.transferOffers).toHaveLength(2);
+      const a = loaded!.transferOffers!.find((o) => o.id === 'offer-a')!;
+      expect(a.status).toBe('withdrawn');
+      expect(a.resolvedAt).toEqual(new Date('2024-08-22'));
+    });
+
+    it('rolls back the entire save when offer persistence fails', async () => {
+      const state = buildState();
+      const goodOffer = makeOffer(state, { id: 'offer-good' });
+      await saveCareer({ ...state, transferOffers: [goodOffer] }, testDb);
+
+      // Snapshot EVERY persisted career table before the failing save.
+      const snapshotAll = async () => ({
+        career: await testDb.select().from(schema.career),
+        clubs: await testDb.select().from(schema.clubs),
+        players: await testDb.select().from(schema.players),
+        leagues: await testDb.select().from(schema.leagues),
+        leagueStandings: await testDb.select().from(schema.leagueStandings),
+        fixtures: await testDb.select().from(schema.fixtures),
+        seasons: await testDb.select().from(schema.seasons),
+        matches: await testDb.select().from(schema.matches),
+        matchEvents: await testDb.select().from(schema.matchEvents),
+        transfers: await testDb.select().from(schema.transfers),
+        transferOffers: await testDb.select().from(schema.transferOffers),
+      });
+      const beforeSnapshot = await snapshotAll();
+      expect(beforeSnapshot.transferOffers).toHaveLength(1);
+
+      // A second save whose offer violates NOT NULL on offer_amount fails
+      // at the very end of the transaction — everything must roll back.
+      const badState = {
+        ...state,
+        career: { ...state.career, managerName: 'Should Not Persist' },
+        transferOffers: [
+          makeOffer(state, { offerAmount: null as any }),
+        ],
+      };
+      await expect(saveCareer(badState, testDb)).rejects.toThrow();
+
+      // Every persisted table is byte-identical to the pre-failure state.
+      expect(await snapshotAll()).toEqual(beforeSnapshot);
+
+      // The previous career and all previous offers remain intact.
+      const loaded = await loadCareer(testDb);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.career.managerName).toBe('Offer Manager');
+      expect(loaded!.transferOffers).toHaveLength(1);
+      expect(loaded!.transferOffers![0].id).toBe('offer-good');
+    });
+
+    it('preserves persisted offers when the save omits transferOffers', async () => {
+      const state = buildState();
+      const offer = makeOffer(state, { id: 'offer-kept' });
+      await saveCareer({ ...state, transferOffers: [offer] }, testDb);
+
+      // Simulate a caller that does not provide the collection at all
+      // (e.g. code written before offer persistence). The field is required
+      // at compile time, so bypass the type to exercise the runtime guard.
+      const { transferOffers: _omitted, ...stateWithoutOffers } = state;
+      await saveCareer(stateWithoutOffers as any, testDb);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.transferOffers).toHaveLength(1);
+      expect(loaded!.transferOffers![0].id).toBe('offer-kept');
+
+      // An explicit empty array still clears the collection.
+      await saveCareer({ ...state, transferOffers: [] }, testDb);
+      const cleared = await loadCareer(testDb);
+      expect(cleared!.transferOffers).toEqual([]);
+      expect(await testDb.select().from(schema.transferOffers)).toHaveLength(0);
+    });
+  });
+
+  describe('career deletion', () => {
+    const careerTables = async () => ({
+      career: await testDb.select().from(schema.career),
+      clubs: await testDb.select().from(schema.clubs),
+      players: await testDb.select().from(schema.players),
+      leagues: await testDb.select().from(schema.leagues),
+      leagueStandings: await testDb.select().from(schema.leagueStandings),
+      fixtures: await testDb.select().from(schema.fixtures),
+      seasons: await testDb.select().from(schema.seasons),
+      matches: await testDb.select().from(schema.matches),
+      matchEvents: await testDb.select().from(schema.matchEvents),
+      transfers: await testDb.select().from(schema.transfers),
+      transferOffers: await testDb.select().from(schema.transferOffers),
+    });
+
+    const seedMatchData = (state: ReturnType<typeof buildState>) => {
+      testDb.insert(schema.matches).values({
+        id: 'match-1',
+        homeClubId: state.clubs[0].id,
+        awayClubId: state.clubs[1].id,
+        seasonId: 'season-1',
+        date: 1722470400000,
+        status: 'completed',
+        homeScore: 2,
+        awayScore: 1,
+        homeTactics: '4-4-2',
+        awayTactics: '4-3-3',
+      }).run();
+      testDb.insert(schema.matchEvents).values({
+        id: 'event-1',
+        matchId: 'match-1',
+        minute: 45,
+        type: 'goal',
+        playerId: state.players[0].id,
+        clubId: state.clubs[0].id,
+        description: 'Goal',
+      }).run();
+    };
+
+    it('removes the career and every career-owned record', async () => {
+      const state = buildState();
+      const offer = makeOffer(state, { id: 'offer-doomed' });
+      await saveCareer({ ...state, transferOffers: [offer] }, testDb);
+      seedMatchData(state);
+
+      // Seed migration metadata — infrastructure that must survive.
+      testDb.insert(schema.schemaMigrations).values({
+        version: 1,
+        name: 'baseline-schema',
+        appliedAt: 1,
+      }).run();
+
+      await deleteCareer(testDb);
+
+      // No career remains.
+      expect(await loadCareer(testDb)).toBeNull();
+
+      // Every career-owned table is empty.
+      const remaining = await careerTables();
+      for (const [table, rows] of Object.entries(remaining)) {
+        expect(`${table}: ${rows.length}`).toBe(`${table}: 0`);
+      }
+
+      // Migration metadata is untouched.
+      const migrations = await testDb.select().from(schema.schemaMigrations);
+      expect(migrations).toHaveLength(1);
+      expect(migrations[0].version).toBe(1);
+    });
+
+    it('rolls back the entire deletion when a delete fails', async () => {
+      const state = buildState();
+      const offer = makeOffer(state, { id: 'offer-safe' });
+      await saveCareer({ ...state, transferOffers: [offer] }, testDb);
+      seedMatchData(state);
+
+      const snapshotAll = async () => ({
+        ...(await careerTables()),
+        schemaMigrations: await testDb.select().from(schema.schemaMigrations),
+      });
+      const before = await snapshotAll();
+      expect(before.players.length).toBeGreaterThan(0);
+      expect(before.transferOffers).toHaveLength(1);
+      expect(before.matches).toHaveLength(1);
+      expect(before.matchEvents).toHaveLength(1);
+
+      // Real SQLite failure injection: a trigger aborts DELETEs on players,
+      // which run late in the deletion order — earlier deletes must roll back.
+      testDb.run(`
+        CREATE TRIGGER fail_delete_test
+        BEFORE DELETE ON players
+        BEGIN
+          SELECT RAISE(ABORT, 'injected delete failure');
+        END
+      `);
+
+      await expect(deleteCareer(testDb)).rejects.toThrow(
+        /injected delete failure/,
+      );
+      testDb.run('DROP TRIGGER fail_delete_test');
+
+      // Every table is byte-identical to the pre-deletion state.
+      expect(await snapshotAll()).toEqual(before);
+
+      // The career still loads intact.
+      const loaded = await loadCareer(testDb);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.career.managerName).toBe('Offer Manager');
+      expect(loaded!.transferOffers).toHaveLength(1);
+    });
+  });
+
+  describe('loadCareer error handling', () => {
+    it('returns null only when no career exists', async () => {
+      expect(await loadCareer(testDb)).toBeNull();
+    });
+
+    it('rejects with context when career data is inconsistent', async () => {
+      const state = buildState();
+      await saveCareer(state, testDb);
+
+      // Remove the league row while the career row still exists: the career
+      // is present but the persisted data is incomplete. This must surface
+      // as an error, not be silently treated as "no career".
+      await testDb.delete(schema.leagues).run();
+
+      await expect(loadCareer(testDb)).rejects.toThrow(
+        /Failed to load career/,
+      );
+
+      // The original cause is preserved for debugging.
+      try {
+        await loadCareer(testDb);
+        fail('expected loadCareer to reject');
+      } catch (error: any) {
+        expect(error.cause).toBeDefined();
+      }
+    });
+
+    it('rejects when the database operation itself fails', async () => {
+      const state = buildState();
+      await saveCareer(state, testDb);
+
+      // Drop a table the loader must read — a genuine SQL failure. Restore
+      // it afterwards so the shared afterEach cleanup still works.
+      testDb.run('DROP TABLE fixtures');
+      try {
+        await expect(loadCareer(testDb)).rejects.toThrow(
+          /Failed to load career/,
+        );
+      } finally {
+        testDb.run(`
+          CREATE TABLE IF NOT EXISTS fixtures (
+            id TEXT PRIMARY KEY,
+            league_id TEXT NOT NULL,
+            home_club_id TEXT NOT NULL,
+            away_club_id TEXT NOT NULL,
+            week INTEGER NOT NULL,
+            date INTEGER NOT NULL,
+            played INTEGER NOT NULL,
+            home_score INTEGER,
+            away_score INTEGER
+          )
+        `);
+      }
+    });
   });
 });

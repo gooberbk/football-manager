@@ -443,6 +443,7 @@ describe('career save/load after a transfer', () => {
         league,
         season,
         transferHistory: result.transferHistory!,
+        transferOffers: [],
       },
       testDb,
     );

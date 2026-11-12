@@ -6,6 +6,8 @@ import type {
   League,
   Season,
   TransferRecord,
+  TransferOffer,
+  TransferOfferStatus,
   StandingEntry,
   Fixture,
 } from '@club-director/shared-types';
@@ -26,178 +28,220 @@ export interface CareerState {
   league: League;
   season: Season;
   transferHistory: TransferRecord[];
+  /**
+   * Transfer offers belonging to this career (pending and resolved,
+   * human- and AI-managed). Required so callers must state the offer
+   * collection explicitly. As a runtime safeguard, saveCareer treats an
+   * omitted (undefined) value as "not provided" and leaves previously
+   * persisted offers untouched rather than silently deleting them; pass []
+   * to clear.
+   */
+  transferOffers: TransferOffer[];
 }
 
 export async function saveCareer(state: CareerState, dbInstance: any): Promise<void> {
   const now = Date.now();
 
-  // Save career metadata
-  await dbInstance.insert(schema.career).values({
-    id: 'active',
-    managerName: state.career.managerName,
-    managedClubId: state.career.managedClubId,
-    createdAt: state.career.createdAt.getTime(),
-    lastPlayedAt: now,
-    schemaVersion: SCHEMA_VERSION,
-  }).onConflictDoUpdate({
-    target: schema.career.id,
-    set: {
+  // All writes run inside a single Drizzle transaction so a save either
+  // commits completely or rolls back entirely, leaving the previous career
+  // untouched.
+  //
+  // The expo-sqlite and better-sqlite3 drivers are synchronous: the
+  // transaction callback MUST be synchronous and must not await anything.
+  // An async callback would return a Promise, causing the transaction to
+  // commit before the writes execute. Builders are executed with .run(),
+  // which is synchronous on both drivers; any thrown error propagates and
+  // triggers a rollback.
+  dbInstance.transaction((tx: any) => {
+    // Save career metadata
+    tx.insert(schema.career).values({
+      id: 'active',
       managerName: state.career.managerName,
       managedClubId: state.career.managedClubId,
+      createdAt: state.career.createdAt.getTime(),
       lastPlayedAt: now,
       schemaVersion: SCHEMA_VERSION,
-    },
+    }).onConflictDoUpdate({
+      target: schema.career.id,
+      set: {
+        managerName: state.career.managerName,
+        managedClubId: state.career.managedClubId,
+        lastPlayedAt: now,
+        schemaVersion: SCHEMA_VERSION,
+      },
+    }).run();
+
+    // Clear existing data
+    tx.delete(schema.players).run();
+    tx.delete(schema.clubs).run();
+    tx.delete(schema.leagues).run();
+    tx.delete(schema.leagueStandings).run();
+    tx.delete(schema.fixtures).run();
+    tx.delete(schema.seasons).run();
+    tx.delete(schema.transfers).run();
+
+    // Save clubs
+    for (const club of state.clubs) {
+      tx.insert(schema.clubs).values({
+        id: club.id,
+        name: club.name,
+        nickname: club.nickname,
+        foundedYear: club.foundedYear,
+        reputation: club.reputation,
+        balance: club.finances.balance,
+        transferBudget: club.finances.transferBudget,
+        wageBudget: club.finances.wageBudget,
+        weeklyIncome: club.finances.weeklyIncome,
+        stadiumName: club.stadium.name,
+        stadiumCapacity: club.stadium.capacity,
+        defaultFormation: club.tactics.defaultFormation,
+        mentality: club.tactics.mentality,
+        pressingIntensity: club.tactics.pressingIntensity,
+        tempo: club.tactics.tempo,
+        width: club.tactics.width,
+      }).run();
+    }
+
+    // Save players
+    for (const player of state.players) {
+      tx.insert(schema.players).values({
+        id: player.id,
+        firstName: player.firstName,
+        lastName: player.lastName,
+        nationality: player.nationality,
+        age: player.age,
+        preferredFoot: player.preferredFoot,
+        primaryPosition: player.primaryPosition,
+        secondaryPositions: JSON.stringify(player.secondaryPositions),
+        passing: player.attributes.technical.passing,
+        shooting: player.attributes.technical.shooting,
+        dribbling: player.attributes.technical.dribbling,
+        tackling: player.attributes.technical.tackling,
+        heading: player.attributes.technical.heading,
+        crossing: player.attributes.technical.crossing,
+        finishing: player.attributes.technical.finishing,
+        technique: player.attributes.technical.technique,
+        longShots: player.attributes.technical.longShots,
+        freeKicks: player.attributes.technical.freeKicks,
+        firstTouch: player.attributes.technical.firstTouch,
+        vision: player.attributes.mental.vision,
+        decisions: player.attributes.mental.decisions,
+        composure: player.attributes.mental.composure,
+        anticipation: player.attributes.mental.anticipation,
+        positioning: player.attributes.mental.positioning,
+        workRate: player.attributes.mental.workRate,
+        determination: player.attributes.mental.determination,
+        leadership: player.attributes.mental.leadership,
+        concentration: player.attributes.mental.concentration,
+        flair: player.attributes.mental.flair,
+        pace: player.attributes.physical.pace,
+        acceleration: player.attributes.physical.acceleration,
+        stamina: player.attributes.physical.stamina,
+        strength: player.attributes.physical.strength,
+        agility: player.attributes.physical.agility,
+        balance: player.attributes.physical.balance,
+        jumping: player.attributes.physical.jumping,
+        naturalFitness: player.attributes.physical.naturalFitness,
+        currentAbility: player.development.currentAbility,
+        potentialAbility: player.development.potentialAbility,
+        ageGrowthCurve: player.development.ageGrowthCurve,
+        morale: player.status.morale,
+        recentForm: JSON.stringify(player.status.recentForm),
+        fitness: player.status.fitness,
+        injuryType: player.status.injury?.type || null,
+        injuryDaysRemaining: player.status.injury?.daysRemaining || null,
+        injurySeverity: player.status.injury?.severity || null,
+        clubId: player.contract.clubId,
+        wage: player.contract.wage,
+        contractExpiryDate: player.contract.contractExpiryDate.getTime(),
+        marketValue: player.contract.marketValue,
+      }).run();
+    }
+
+    // Save league
+    tx.insert(schema.leagues).values({
+      id: state.league.id,
+      name: state.league.name,
+      tier: state.league.tier,
+      clubIds: JSON.stringify(state.league.clubIds),
+    }).run();
+
+    // Save league standings
+    for (const entry of state.league.standings.entries) {
+      tx.insert(schema.leagueStandings).values({
+        id: `${state.league.id}-${entry.clubId}`,
+        leagueId: state.league.id,
+        clubId: entry.clubId,
+        played: entry.played,
+        won: entry.won,
+        drawn: entry.drawn,
+        lost: entry.lost,
+        goalsFor: entry.goalsFor,
+        goalsAgainst: entry.goalsAgainst,
+        goalDifference: entry.goalDifference,
+        points: entry.points,
+      }).run();
+    }
+
+    // Save fixtures
+    for (const fixture of state.league.fixtures) {
+      tx.insert(schema.fixtures).values({
+        id: fixture.id,
+        leagueId: state.league.id,
+        homeClubId: fixture.homeClubId,
+        awayClubId: fixture.awayClubId,
+        week: fixture.week,
+        date: fixture.date.getTime(),
+        played: fixture.played ? 1 : 0,
+        homeScore: fixture.played ? (fixture.homeScore ?? 0) : null,
+        awayScore: fixture.played ? (fixture.awayScore ?? 0) : null,
+      }).run();
+    }
+
+    // Save season
+    tx.insert(schema.seasons).values({
+      id: state.season.id,
+      leagueId: state.season.leagueId,
+      currentWeek: state.season.currentWeek,
+      currentDate: state.season.currentDate.getTime(),
+      transferWindowOpen: state.season.transferWindowOpen ? 1 : 0,
+    }).run();
+
+    // Save transfer history
+    for (const transfer of state.transferHistory) {
+      tx.insert(schema.transfers).values({
+        id: transfer.id,
+        playerId: transfer.playerId,
+        fromClubId: transfer.fromClubId,
+        toClubId: transfer.toClubId,
+        fee: transfer.fee,
+        type: 'transfer',
+        date: transfer.date.getTime(),
+        status: 'completed',
+      }).run();
+    }
+
+    // Save transfer offers (pending and resolved, human- and AI-managed).
+    // Only rewrite the table when the caller actually provided the
+    // collection: an omitted value means "not provided" and must not wipe
+    // previously persisted offers. Pass [] to clear them explicitly.
+    const transferOffers: TransferOffer[] | undefined = state.transferOffers;
+    if (transferOffers !== undefined) {
+      tx.delete(schema.transferOffers).run();
+      for (const offer of transferOffers) {
+        tx.insert(schema.transferOffers).values({
+          id: offer.id,
+          playerId: offer.playerId,
+          buyingClubId: offer.buyingClubId,
+          sellingClubId: offer.sellingClubId,
+          offerAmount: offer.offerAmount,
+          status: offer.status,
+          createdAt: offer.createdAt.getTime(),
+          resolvedAt: offer.resolvedAt ? offer.resolvedAt.getTime() : null,
+        }).run();
+      }
+    }
   });
-
-  // Clear existing data
-  await dbInstance.delete(schema.players);
-  await dbInstance.delete(schema.clubs);
-  await dbInstance.delete(schema.leagues);
-  await dbInstance.delete(schema.leagueStandings);
-  await dbInstance.delete(schema.fixtures);
-  await dbInstance.delete(schema.seasons);
-  await dbInstance.delete(schema.transfers);
-
-  // Save clubs
-  for (const club of state.clubs) {
-    await dbInstance.insert(schema.clubs).values({
-      id: club.id,
-      name: club.name,
-      nickname: club.nickname,
-      foundedYear: club.foundedYear,
-      reputation: club.reputation,
-      balance: club.finances.balance,
-      transferBudget: club.finances.transferBudget,
-      wageBudget: club.finances.wageBudget,
-      weeklyIncome: club.finances.weeklyIncome,
-      stadiumName: club.stadium.name,
-      stadiumCapacity: club.stadium.capacity,
-      defaultFormation: club.tactics.defaultFormation,
-      mentality: club.tactics.mentality,
-      pressingIntensity: club.tactics.pressingIntensity,
-      tempo: club.tactics.tempo,
-      width: club.tactics.width,
-    });
-  }
-
-  // Save players
-  for (const player of state.players) {
-    await dbInstance.insert(schema.players).values({
-      id: player.id,
-      firstName: player.firstName,
-      lastName: player.lastName,
-      nationality: player.nationality,
-      age: player.age,
-      preferredFoot: player.preferredFoot,
-      primaryPosition: player.primaryPosition,
-      secondaryPositions: JSON.stringify(player.secondaryPositions),
-      passing: player.attributes.technical.passing,
-      shooting: player.attributes.technical.shooting,
-      dribbling: player.attributes.technical.dribbling,
-      tackling: player.attributes.technical.tackling,
-      heading: player.attributes.technical.heading,
-      crossing: player.attributes.technical.crossing,
-      finishing: player.attributes.technical.finishing,
-      technique: player.attributes.technical.technique,
-      longShots: player.attributes.technical.longShots,
-      freeKicks: player.attributes.technical.freeKicks,
-      firstTouch: player.attributes.technical.firstTouch,
-      vision: player.attributes.mental.vision,
-      decisions: player.attributes.mental.decisions,
-      composure: player.attributes.mental.composure,
-      anticipation: player.attributes.mental.anticipation,
-      positioning: player.attributes.mental.positioning,
-      workRate: player.attributes.mental.workRate,
-      determination: player.attributes.mental.determination,
-      leadership: player.attributes.mental.leadership,
-      concentration: player.attributes.mental.concentration,
-      flair: player.attributes.mental.flair,
-      pace: player.attributes.physical.pace,
-      acceleration: player.attributes.physical.acceleration,
-      stamina: player.attributes.physical.stamina,
-      strength: player.attributes.physical.strength,
-      agility: player.attributes.physical.agility,
-      balance: player.attributes.physical.balance,
-      jumping: player.attributes.physical.jumping,
-      naturalFitness: player.attributes.physical.naturalFitness,
-      currentAbility: player.development.currentAbility,
-      potentialAbility: player.development.potentialAbility,
-      ageGrowthCurve: player.development.ageGrowthCurve,
-      morale: player.status.morale,
-      recentForm: JSON.stringify(player.status.recentForm),
-      fitness: player.status.fitness,
-      injuryType: player.status.injury?.type || null,
-      injuryDaysRemaining: player.status.injury?.daysRemaining || null,
-      injurySeverity: player.status.injury?.severity || null,
-      clubId: player.contract.clubId,
-      wage: player.contract.wage,
-      contractExpiryDate: player.contract.contractExpiryDate.getTime(),
-      marketValue: player.contract.marketValue,
-    });
-  }
-
-  // Save league
-  await dbInstance.insert(schema.leagues).values({
-    id: state.league.id,
-    name: state.league.name,
-    tier: state.league.tier,
-    clubIds: JSON.stringify(state.league.clubIds),
-  });
-
-  // Save league standings
-  for (const entry of state.league.standings.entries) {
-    await dbInstance.insert(schema.leagueStandings).values({
-      id: `${state.league.id}-${entry.clubId}`,
-      leagueId: state.league.id,
-      clubId: entry.clubId,
-      played: entry.played,
-      won: entry.won,
-      drawn: entry.drawn,
-      lost: entry.lost,
-      goalsFor: entry.goalsFor,
-      goalsAgainst: entry.goalsAgainst,
-      goalDifference: entry.goalDifference,
-      points: entry.points,
-    });
-  }
-
-  // Save fixtures
-  for (const fixture of state.league.fixtures) {
-    await dbInstance.insert(schema.fixtures).values({
-      id: fixture.id,
-      leagueId: state.league.id,
-      homeClubId: fixture.homeClubId,
-      awayClubId: fixture.awayClubId,
-      week: fixture.week,
-      date: fixture.date.getTime(),
-      played: fixture.played ? 1 : 0,
-      homeScore: fixture.played ? (fixture.homeScore ?? 0) : null,
-      awayScore: fixture.played ? (fixture.awayScore ?? 0) : null,
-    });
-  }
-
-  // Save season
-  await dbInstance.insert(schema.seasons).values({
-    id: state.season.id,
-    leagueId: state.season.leagueId,
-    currentWeek: state.season.currentWeek,
-    currentDate: state.season.currentDate.getTime(),
-    transferWindowOpen: state.season.transferWindowOpen ? 1 : 0,
-  });
-
-  // Save transfer history
-  for (const transfer of state.transferHistory) {
-    await dbInstance.insert(schema.transfers).values({
-      id: transfer.id,
-      playerId: transfer.playerId,
-      fromClubId: transfer.fromClubId,
-      toClubId: transfer.toClubId,
-      fee: transfer.fee,
-      type: 'transfer',
-      date: transfer.date.getTime(),
-      status: 'completed',
-    });
-  }
 }
 
 export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
@@ -384,6 +428,22 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
       date: new Date(record.date),
     }));
 
+    // Load transfer offers
+    const offerRecords = await dbInstance.select().from(schema.transferOffers);
+    const transferOffers: TransferOffer[] = offerRecords.map((record: any) => ({
+      id: record.id,
+      playerId: record.playerId,
+      buyingClubId: record.buyingClubId,
+      sellingClubId: record.sellingClubId,
+      offerAmount: record.offerAmount,
+      status: record.status as TransferOfferStatus,
+      createdAt: new Date(record.createdAt),
+      resolvedAt:
+        record.resolvedAt !== null && record.resolvedAt !== undefined
+          ? new Date(record.resolvedAt)
+          : undefined,
+    }));
+
     return {
       career: {
         id: careerRecord.id,
@@ -398,13 +458,40 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
       league,
       season,
       transferHistory,
+      transferOffers,
     };
   } catch (error) {
-    console.error('Failed to load career:', error);
-    return null;
+    // Only a missing career row returns null (handled above). Any other
+    // failure — SQL errors, malformed rows, schema incompatibility — is an
+    // unexpected error and must propagate so callers can distinguish "no
+    // career" from "database is broken". The original error is preserved
+    // as `cause`.
+    const message = error instanceof Error ? error.message : String(error);
+    const wrapped = new Error(`Failed to load career: ${message}`);
+    (wrapped as { cause?: unknown }).cause = error;
+    throw wrapped;
   }
 }
 
+/**
+ * Delete the active career and every career-owned record, atomically.
+ *
+ * All deletes run inside one synchronous Drizzle transaction: a failure at
+ * any point rolls back the entire deletion. `schema_migrations` is database
+ * infrastructure, not career data, and is intentionally preserved.
+ */
 export async function deleteCareer(dbInstance: any): Promise<void> {
-  await dbInstance.delete(schema.career).where(eq(schema.career.id, 'active'));
+  dbInstance.transaction((tx: any) => {
+    tx.delete(schema.transferOffers).run();
+    tx.delete(schema.matchEvents).run();
+    tx.delete(schema.matches).run();
+    tx.delete(schema.fixtures).run();
+    tx.delete(schema.leagueStandings).run();
+    tx.delete(schema.transfers).run();
+    tx.delete(schema.seasons).run();
+    tx.delete(schema.leagues).run();
+    tx.delete(schema.players).run();
+    tx.delete(schema.clubs).run();
+    tx.delete(schema.career).run();
+  });
 }

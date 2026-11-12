@@ -1,7 +1,39 @@
+import { ActivityIndicator, View } from 'react-native';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { ensureCareerBoot } from '../../services/careerBoot';
+import { useGameState } from '../../store/useGameState';
+import { useTheme } from '../../theme/useTheme';
+import { BootErrorView } from '../../components/BootErrorView';
 
 export default function TabsLayout() {
+  const bootStatus = useGameState((state) => state.bootStatus);
+  const { colors } = useTheme();
+
+  // Deep links can land here without passing through the index gate, so
+  // this layout must honor the shared boot status on every entry path:
+  // 'pending' shows a loader (same as the index gate), 'error' shows the
+  // shared recoverable error — never the tabs' "No career data found"
+  // empty state. 'loaded'/'empty' render the tabs normally.
+  if (bootStatus === 'pending') {
+    return (
+      <View
+        style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: colors.background,
+        }}
+      >
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  if (bootStatus === 'error') {
+    return <BootErrorView onRetry={() => ensureCareerBoot()} />;
+  }
+
   return (
     <Tabs
       initialRouteName="dashboard"

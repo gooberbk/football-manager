@@ -184,6 +184,27 @@ function initializeTestSchema(sqlite: Database.Database) {
   `);
 
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS transfer_offers (
+      id TEXT PRIMARY KEY,
+      player_id TEXT NOT NULL,
+      buying_club_id TEXT NOT NULL,
+      selling_club_id TEXT NOT NULL,
+      offer_amount INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    )
+  `);
+
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at INTEGER NOT NULL
+    )
+  `);
+
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS career (
       id TEXT PRIMARY KEY,
       manager_name TEXT NOT NULL,
@@ -206,7 +227,10 @@ export function resetTestDatabase() {
     sqliteInstance.exec('DROP TABLE IF EXISTS matches');
     sqliteInstance.exec('DROP TABLE IF EXISTS match_events');
     sqliteInstance.exec('DROP TABLE IF EXISTS transfers');
+    sqliteInstance.exec('DROP TABLE IF EXISTS transfer_offers');
+    sqliteInstance.exec('DROP TABLE IF EXISTS schema_migrations');
     sqliteInstance.exec('DROP TABLE IF EXISTS career');
+    sqliteInstance.exec('DROP TRIGGER IF EXISTS fail_delete_test');
     initializeTestSchema(sqliteInstance);
   }
 }

@@ -156,6 +156,17 @@ export const transfers = sqliteTable('transfers', {
   status: text('status').notNull(),
 });
 
+export const transferOffers = sqliteTable('transfer_offers', {
+  id: text('id').primaryKey(),
+  playerId: text('player_id').notNull(),
+  buyingClubId: text('buying_club_id').notNull(),
+  sellingClubId: text('selling_club_id').notNull(),
+  offerAmount: integer('offer_amount').notNull(),
+  status: text('status').notNull(),
+  createdAt: integer('created_at').notNull(),
+  resolvedAt: integer('resolved_at'),
+});
+
 export const career = sqliteTable('career', {
   id: text('id').primaryKey(),
   managerName: text('manager_name').notNull(),
@@ -163,4 +174,10 @@ export const career = sqliteTable('career', {
   createdAt: integer('created_at').notNull(),
   lastPlayedAt: integer('last_played_at').notNull(),
   schemaVersion: integer('schema_version').notNull(),
+});
+
+export const schemaMigrations = sqliteTable('schema_migrations', {
+  version: integer('version').primaryKey(),
+  name: text('name').notNull(),
+  appliedAt: integer('applied_at').notNull(),
 });

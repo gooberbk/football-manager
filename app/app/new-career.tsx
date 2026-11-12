@@ -1,91 +1,18 @@
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
-import { generateSeedData, generateFixtures, scheduledFixturesToLeagueFixtures } from '@club-director/engine';
-import { saveCareer, initializeDatabase } from '../db';
-import type { League, Season } from '@club-director/shared-types';
-import { useGameState } from '../store/useGameState';
+import { generateSeedData } from '@club-director/engine';
+import { createCareer } from '../services/careerCreation';
 import { useTheme } from '../theme/useTheme';
 import { typography } from '../theme/typography';
 import { Card } from '../components/Card';
 
 export default function NewCareerScreen() {
   const router = useRouter();
-  const { setLeague, setSeason, setClubs, setPlayers, setManagedClubId, setIsLoading, setTransferHistory, setTransferOffers, setResultsHistory } = useGameState();
   const { colors } = useTheme();
 
   const handleStartCareer = async (clubIndex: number) => {
     try {
-      await initializeDatabase();
-
-      const seedData = generateSeedData(12345);
-      const clubs = seedData.clubs;
-      const players = seedData.players;
-
-      const selectedClub = clubs[clubIndex];
-
-      const league: League = {
-        id: 'league-1',
-        name: 'Premier Division',
-        tier: 1,
-        clubIds: clubs.map((c) => c.id),
-        standings: {
-          entries: clubs.map((club) => ({
-            clubId: club.id,
-            played: 0,
-            won: 0,
-            drawn: 0,
-            lost: 0,
-            goalsFor: 0,
-            goalsAgainst: 0,
-            goalDifference: 0,
-            points: 0,
-          })),
-        },
-        fixtures: [],
-      };
-
-      const season: Season = {
-        id: 'season-1',
-        leagueId: 'league-1',
-        currentWeek: 1,
-        currentDate: new Date('2024-08-01'),
-        transferWindowOpen: true,
-        fixturesCalendar: [],
-      };
-
-      // Generate fixtures
-      const scheduledFixtures = generateFixtures(clubs.map((c) => c.id), new Date('2024-08-01'));
-      league.fixtures = scheduledFixturesToLeagueFixtures(scheduledFixtures);
-
-      const careerState = {
-        career: {
-          id: 'active',
-          managerName: 'Player',
-          managedClubId: selectedClub.id,
-          createdAt: new Date(),
-          lastPlayedAt: new Date(),
-          schemaVersion: 1,
-        },
-        clubs,
-        players,
-        league,
-        season,
-        transferHistory: [],
-      };
-
-      await saveCareer(careerState);
-
-      // Update Zustand store
-      setLeague(league);
-      setSeason(season);
-      setClubs(clubs);
-      setPlayers(players);
-      setManagedClubId(selectedClub.id);
-      setTransferHistory([]);
-      setTransferOffers([]);
-      setResultsHistory([]);
-      setIsLoading(false);
-
+      await createCareer(clubIndex);
       router.replace('/dashboard');
     } catch (error) {
       console.error('Failed to start career:', error);
