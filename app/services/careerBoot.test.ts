@@ -1,5 +1,6 @@
 import type { CareerState } from '../db/careerPersistence';
 import type { TransferOffer } from '@club-director/shared-types';
+import type { PersistedMatch } from '../db/matchRecords';
 
 // Mock the database layer so the boot flow can be tested without expo-sqlite.
 jest.mock('../db', () => ({
@@ -37,6 +38,7 @@ function buildLoadedCareer(transferOffers: TransferOffer[]): CareerState {
     },
     transferHistory: [],
     transferOffers,
+    matches: [],
   };
 }
 
@@ -81,6 +83,70 @@ describe('ensureCareerBoot', () => {
     expect(store.transferOffers).toEqual(offers);
     expect(store.managedClubId).toBe('club-1');
     expect(store.isLoading).toBe(false);
+  });
+
+
+  it('restores persisted matches into the store', async () => {
+    const { ensureCareerBoot, getStore, mockLoadCareer } = await freshBoot();
+    const match: PersistedMatch = {
+      id: 'match-8:league-18:season-19:fixture-7',
+      fixtureId: 'fixture-7',
+      seasonId: 'season-1',
+      leagueId: 'l1',
+      date: new Date('2024-08-10T15:00:00Z'),
+      status: 'completed',
+      homeClubId: 'club-1',
+      awayClubId: 'club-2',
+      homeScore: 2,
+      awayScore: 1,
+      homeTactics: {
+        defaultFormation: '4-4-2',
+        mentality: 'balanced',
+        pressingIntensity: 10,
+        tempo: 10,
+        width: 10,
+      },
+      awayTactics: {
+        defaultFormation: '4-3-3',
+        mentality: 'balanced',
+        pressingIntensity: 10,
+        tempo: 10,
+        width: 10,
+      },
+      stats: {
+        home: {
+          possession: 55, shots: 12, shotsOnTarget: 5, corners: 6,
+          fouls: 8, yellowCards: 1, redCards: 0,
+        },
+        away: {
+          possession: 45, shots: 7, shotsOnTarget: 3, corners: 2,
+          fouls: 10, yellowCards: 2, redCards: 0,
+        },
+      },
+      seed: 987654,
+      participantIds: ['p1', 'p2'],
+      events: [
+        {
+          id: 'match-8:league-18:season-19:fixture-7:12:goal:0',
+          minute: 12,
+          type: 'goal',
+          primaryPlayerId: 'p1',
+          secondaryPlayerId: null,
+          team: 'home',
+          clubId: 'club-1',
+          description: 'GOAL!',
+        },
+      ],
+    };
+    const career = buildLoadedCareer([]);
+    career.matches = [match];
+    mockLoadCareer.mockResolvedValue(career);
+
+    const result = await ensureCareerBoot();
+    const store = getStore();
+
+    expect(result).toBe('loaded');
+    expect(store.matches).toEqual([match]);
   });
 
   it('reports empty when no career exists', async () => {

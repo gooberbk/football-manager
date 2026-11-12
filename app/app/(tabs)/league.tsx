@@ -7,15 +7,17 @@ import { Card } from '../../components/Card';
 import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
 import { advanceMatchweek } from '@club-director/engine';
+import { buildPersistedMatch } from '../../db/matchRecords';
+import type { PersistedMatch } from '../../db/matchRecords';
 
 export default function LeagueScreen() {
-  const { league, season, clubs, players, isLoading, managedClubId, resultsHistory, transferOffers, transferHistory, setLeague, setSeason, setClubs, setPlayers, setTransferOffers, setTransferHistory, addResult, saveState } = useGameState();
+  const { league, season, clubs, players, isLoading, managedClubId, resultsHistory, transferOffers, transferHistory, matches, setLeague, setSeason, setClubs, setPlayers, setTransferOffers, setTransferHistory, setMatches, addResult, saveState } = useGameState();
   const { colors } = useTheme();
 
   // Autosave after state changes
   useEffect(() => {
     saveState();
-  }, [league, season, clubs, players, resultsHistory, transferHistory, saveState]);
+  }, [league, season, clubs, players, resultsHistory, transferHistory, matches, saveState]);
 
   const handleSimulateMatchweek = async () => {
     if (!league || !season || !clubs || !players) return;
@@ -23,6 +25,46 @@ export default function LeagueScreen() {
     const advancement = advanceMatchweek(season, league, clubs, players, {
       managedClubId: managedClubId ?? undefined,
     });
+
+    // Build and validate every PersistedMatch BEFORE touching the store:
+    // if construction fails, no setter runs and no partial state can be
+    // autosaved (scores without their match history). Records use the
+    // post-matchweek objects, which keep the referential integrity
+    // buildPersistedMatch validates. Match ids are deterministic, so
+    // merging by id makes a repeated simulation of the same week
+    // idempotent.
+    const newMatches: PersistedMatch[] = advancement.results.map((r) => {
+      const fixture = advancement.updatedLeague.fixtures.find(
+        (f) => f.id === r.fixtureId,
+      );
+      const homeClub = advancement.updatedClubs.find(
+        (c) => c.id === r.homeClubId,
+      );
+      const awayClub = advancement.updatedClubs.find(
+        (c) => c.id === r.awayClubId,
+      );
+      if (!fixture || !homeClub || !awayClub) {
+        throw new Error(
+          `Cannot record match for fixture ${r.fixtureId}: missing fixture or club in advancement result`,
+        );
+      }
+      return buildPersistedMatch({
+        fixture,
+        season: advancement.updatedSeason,
+        league: advancement.updatedLeague,
+        homeClub,
+        awayClub,
+        result: r.result,
+      });
+    });
+    let mergedMatches: PersistedMatch[] | null = null;
+    if (newMatches.length > 0) {
+      const existingIds = new Set(matches.map((m) => m.id));
+      const toAdd = newMatches.filter((m) => !existingIds.has(m.id));
+      if (toAdd.length > 0) {
+        mergedMatches = [...matches, ...toAdd];
+      }
+    }
 
     setLeague(advancement.updatedLeague);
     setSeason(advancement.updatedSeason);
@@ -43,6 +85,9 @@ export default function LeagueScreen() {
     ]);
     if (advancement.transferRecords.length > 0) {
       setTransferHistory([...transferHistory, ...advancement.transferRecords]);
+    }
+    if (mergedMatches !== null) {
+      setMatches(mergedMatches);
     }
 
     // Add result to history

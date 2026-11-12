@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
-import { getTableColumns } from 'drizzle-orm';
+import { getTableColumns, getTableName } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema';
 import {
   initializeDatabaseSchema,
+  MIGRATIONS,
   runMigrations,
   type Migration,
 } from './migrations';
@@ -267,8 +268,8 @@ describe('database migrations', () => {
      'transfer_offers', 'schema_migrations'].forEach((t) =>
       expect(tableExists(sqlite, t)).toBe(true));
 
-    // Baseline + migration v2 recorded exactly once each.
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    // Baseline + migrations v2 and v3 recorded exactly once each.
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
   });
 
   it('detects a compatible legacy database and preserves career data', async () => {
@@ -299,8 +300,22 @@ describe('database migrations', () => {
 
     initializeDatabaseSchema(db);
 
-    // Migration metadata established through v2; game data untouched.
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    // Migration metadata established through v3; game data untouched.
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+
+    // The v3 match-persistence columns exist after migrating the legacy DB.
+    const matchCols = sqlite
+      .prepare('PRAGMA table_info(matches)')
+      .all() as any[];
+    expect(matchCols.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        'fixture_id', 'stats', 'seed', 'participant_ids',
+      ]),
+    );
+    const eventCols = sqlite
+      .prepare('PRAGMA table_info(match_events)')
+      .all() as any[];
+    expect(eventCols.map((c) => c.name)).toContain('secondary_player_id');
     const clubsAfter = sqlite.prepare('SELECT COUNT(*) AS c FROM clubs').get() as any;
     const playersAfter = sqlite.prepare('SELECT COUNT(*) AS c FROM players').get() as any;
     expect(clubsAfter.c).toBe(clubsBefore.c);
@@ -405,15 +420,15 @@ describe('database migrations', () => {
   it('rejects a migration history with a missing intermediate version', () => {
     const { db, sqlite } = createRawDb();
     initializeDatabaseSchema(db);
-    // Production head is v2; simulate a corrupted history claiming v3 and
-    // v5 were applied while v4 never ran.
+    // Production head is v3; simulate a corrupted history claiming v5 was
+    // applied while v4 never ran.
     const defs: Migration[] = [2, 3, 4, 5].map((v) => ({
       version: v,
       name: `migration-${v}`,
       up: (tx) => tx.run(`CREATE TABLE t${v} (id TEXT PRIMARY KEY)`),
     }));
 
-    for (const v of [3, 5]) {
+    for (const v of [5]) {
       db.insert(schema.schemaMigrations).values({
         version: v,
         name: `migration-${v}`,
@@ -479,7 +494,7 @@ describe('database migrations', () => {
     expect(executed).toBe(0);
     expect(tableExists(sqlite, 't2')).toBe(false);
     expect(tableExists(sqlite, 't4')).toBe(false);
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
   });
 
   it('rejects gapped migration definitions [2, 3, 5]', () => {
@@ -493,7 +508,7 @@ describe('database migrations', () => {
     }));
 
     expect(() => runMigrations(db, defs)).toThrow(/contiguous/);
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
   });
 
   it('rejects duplicate migration versions', () => {
@@ -509,7 +524,7 @@ describe('database migrations', () => {
     expect(() => runMigrations(db, [dup, { ...dup }])).toThrow(
       /Duplicate migration version/,
     );
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
   });
 
   it('rejects duplicate migration definitions during initialization before any writes', () => {
@@ -568,7 +583,7 @@ describe('database migrations', () => {
       };
       expect(() => runMigrations(db, [bad])).toThrow(/Invalid migration/);
     }
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
   });
 
   it('rejects a malformed schema_migrations table before migrating', () => {
@@ -614,35 +629,30 @@ describe('database migrations', () => {
   it('applies a migration exactly once and skips it when already at latest', () => {
     const { db, sqlite } = createRawDb();
     initializeDatabaseSchema(db);
-    expect(appliedVersions(db)).toEqual([1, 2]); // production migrations applied
+    expect(appliedVersions(db)).toEqual([1, 2, 3]); // production migrations applied
 
-    // Non-idempotent migration: would throw if executed twice. Version 3 —
-    // version 2 is already taken by the production transfer_offers migration.
+    // Non-idempotent migration: would throw if executed twice. Version 4 —
+    // versions 2 and 3 are taken by production migrations.
     const migration: Migration = {
-      version: 3,
+      version: 4,
       name: 'create-widget-table',
       up: (tx) => {
         tx.run('CREATE TABLE widget (id TEXT PRIMARY KEY)');
       },
     };
+    const noopV2: Migration = { version: 2, name: 'noop-v2', up: () => {} };
+    const noopV3: Migration = { version: 3, name: 'noop-v3', up: () => {} };
 
-    runMigrations(db, [
-      // v2 must be present for contiguity; it is already applied and skipped.
-      { version: 2, name: 'noop-v2', up: () => {} },
-      migration,
-    ]);
+    runMigrations(db, [noopV2, noopV3, migration]);
     expect(tableExists(sqlite, 'widget')).toBe(true);
-    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4]);
 
     // Second run: migration must not rerun (would throw on duplicate table).
-    runMigrations(db, [
-      { version: 2, name: 'noop-v2', up: () => {} },
-      migration,
-    ]);
-    expect(appliedVersions(db)).toEqual([1, 2, 3]);
-    const v3Records = (db.select().from(schema.schemaMigrations).all() as any[])
-      .filter((r) => r.version === 3);
-    expect(v3Records).toHaveLength(1);
+    runMigrations(db, [noopV2, noopV3, migration]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4]);
+    const v4Records = (db.select().from(schema.schemaMigrations).all() as any[])
+      .filter((r) => r.version === 4);
+    expect(v4Records).toHaveLength(1);
   });
 
   it('rolls back a failed migration and does not advance the version', () => {
@@ -650,8 +660,9 @@ describe('database migrations', () => {
     initializeDatabaseSchema(db);
 
     const noopV2: Migration = { version: 2, name: 'noop-v2', up: () => {} };
+    const noopV3: Migration = { version: 3, name: 'noop-v3', up: () => {} };
     const badMigration: Migration = {
-      version: 3,
+      version: 4,
       name: 'failing-migration',
       up: (tx) => {
         tx.run('CREATE TABLE partial_work (id TEXT PRIMARY KEY)');
@@ -659,24 +670,26 @@ describe('database migrations', () => {
       },
     };
 
-    expect(() => runMigrations(db, [noopV2, badMigration])).toThrow();
+    expect(() =>
+      runMigrations(db, [noopV2, noopV3, badMigration]),
+    ).toThrow();
 
     // The partial table creation was rolled back.
     expect(tableExists(sqlite, 'partial_work')).toBe(false);
-    // The version was not recorded — still at the production head (v2).
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    // The version was not recorded — still at the production head (v3).
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
 
     // A corrected migration can still be applied afterwards.
     const goodMigration: Migration = {
-      version: 3,
+      version: 4,
       name: 'create-widget-table',
       up: (tx) => {
         tx.run('CREATE TABLE widget (id TEXT PRIMARY KEY)');
       },
     };
-    runMigrations(db, [noopV2, goodMigration]);
+    runMigrations(db, [noopV2, noopV3, goodMigration]);
     expect(tableExists(sqlite, 'widget')).toBe(true);
-    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4]);
   });
 
   it('rejects a database from a newer app version', () => {
@@ -702,8 +715,9 @@ describe('database migrations', () => {
     await saveCareer(careerState, db);
 
     const noopV2: Migration = { version: 2, name: 'noop-v2', up: () => {} };
+    const noopV3: Migration = { version: 3, name: 'noop-v3', up: () => {} };
     const migration: Migration = {
-      version: 3,
+      version: 4,
       name: 'add-career-notes',
       up: (tx) => {
         tx.run('ALTER TABLE career ADD COLUMN notes TEXT');
@@ -711,7 +725,7 @@ describe('database migrations', () => {
       },
     };
 
-    runMigrations(db, [noopV2, migration]);
+    runMigrations(db, [noopV2, noopV3, migration]);
 
     // Career reloads identically after the schema change.
     const loaded = await loadCareer(db);
@@ -725,7 +739,7 @@ describe('database migrations', () => {
       .prepare('SELECT notes FROM career WHERE id = ?')
       .get('active') as any;
     expect(careerRow.notes).toBe('migrated');
-    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4]);
   });
 
   it('migration v2 transfer_offers schema matches the Drizzle definition', () => {
@@ -759,4 +773,220 @@ describe('database migrations', () => {
         .map((c) => c.name),
     ).toEqual(['resolved_at']);
   });
+
+describe('migration v3 — match persistence columns', () => {
+  /** Database at schema version 2 (baseline + transfer_offers only). */
+  function createV2Db() {
+    const raw = createRawDb();
+    initializeDatabaseSchema(raw.db, [MIGRATIONS[0]]);
+    return raw;
+  }
+
+  function columnNames(sqlite: Database.Database, table: string): string[] {
+    return (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(
+      (c) => c.name,
+    );
+  }
+
+  function indexNames(sqlite: Database.Database): string[] {
+    return (
+      sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' " +
+            "AND name NOT LIKE 'sqlite_%'",
+        )
+        .all() as any[]
+    ).map((r) => r.name as string);
+  }
+
+  function insertPreV3Match(sqlite: Database.Database) {
+    sqlite
+      .prepare(
+        `INSERT INTO matches
+          (id, home_club_id, away_club_id, season_id, date, status,
+           home_score, away_score, home_tactics, away_tactics)
+         VALUES ('match-1', 'club-h', 'club-a', 'season-1', 1723713600000,
+                 'completed', 2, 1, '{}', '{}')`,
+      )
+      .run();
+    sqlite
+      .prepare(
+        `INSERT INTO match_events
+          (id, match_id, minute, type, player_id, club_id, description)
+         VALUES ('ev-1', 'match-1', 12, 'goal', 'p9', 'club-h', 'GOAL!')`,
+      )
+      .run();
+  }
+
+  it('adds all five columns as nullable and creates the expected indexes', () => {
+    const { db, sqlite } = createRawDb();
+    initializeDatabaseSchema(db);
+
+    const matchCols = sqlite
+      .prepare('PRAGMA table_info(matches)')
+      .all() as any[];
+    for (const name of [
+      'fixture_id',
+      'stats',
+      'seed',
+      'participant_ids',
+    ]) {
+      const col = matchCols.find((c) => c.name === name)!;
+      expect(col).toBeTruthy();
+      expect(col.notnull).toBe(0); // nullable — no invented defaults
+    }
+    const eventCols = sqlite
+      .prepare('PRAGMA table_info(match_events)')
+      .all() as any[];
+    const secondary = eventCols.find((c) => c.name === 'secondary_player_id')!;
+    expect(secondary).toBeTruthy();
+    expect(secondary.notnull).toBe(0);
+
+    const indexes = indexNames(sqlite);
+    expect(indexes).toContain('idx_match_events_match_id');
+    expect(indexes).toContain('idx_matches_season_fixture');
+    // No UNIQUE constraint was added on fixture_id.
+    const matchSql = sqlite
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'",
+      )
+      .get() as any;
+    expect(matchSql.sql).not.toMatch(/fixture_id[^,]*UNIQUE/i);
+  });
+
+  it('preserves pre-existing match rows on a v2 database, leaving new columns NULL', () => {
+    const { db, sqlite } = createV2Db();
+    insertPreV3Match(sqlite);
+    expect(columnNames(sqlite, 'matches')).not.toContain('fixture_id');
+
+    initializeDatabaseSchema(db);
+
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+    const match = sqlite
+      .prepare('SELECT * FROM matches WHERE id = ?')
+      .get('match-1') as any;
+    expect(match.home_score).toBe(2);
+    expect(match.away_score).toBe(1);
+    // New columns are NULL — nothing was invented for the old row.
+    expect(match.fixture_id).toBeNull();
+    expect(match.stats).toBeNull();
+    expect(match.seed).toBeNull();
+    expect(match.participant_ids).toBeNull();
+
+    const event = sqlite
+      .prepare('SELECT * FROM match_events WHERE id = ?')
+      .get('ev-1') as any;
+    expect(event.minute).toBe(12);
+    expect(event.secondary_player_id).toBeNull();
+  });
+
+  it('preserves match rows on a pre-framework legacy database', () => {
+    const { db, sqlite } = createLegacyDb();
+    insertPreV3Match(sqlite);
+
+    initializeDatabaseSchema(db);
+
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+    const match = sqlite
+      .prepare('SELECT * FROM matches WHERE id = ?')
+      .get('match-1') as any;
+    expect(match.status).toBe('completed');
+    expect(match.fixture_id).toBeNull();
+    const event = sqlite
+      .prepare('SELECT * FROM match_events WHERE id = ?')
+      .get('ev-1') as any;
+    expect(event.secondary_player_id).toBeNull();
+  });
+
+  it('rolls back a failed v3 migration: no columns added, version not recorded', () => {
+    const { db, sqlite } = createV2Db();
+
+    const noopV2: Migration = { version: 2, name: 'noop-v2', up: () => {} };
+    const failingV3: Migration = {
+      version: 3,
+      name: 'failing-v3',
+      up: (tx) => {
+        tx.run('ALTER TABLE matches ADD COLUMN fixture_id TEXT');
+        tx.run('ALTER TABLE matches ADD COLUMN stats TEXT');
+        tx.run('INSERT INTO nonexistent_table VALUES (1)'); // throws
+      },
+    };
+
+    expect(() => runMigrations(db, [noopV2, failingV3])).toThrow();
+
+    // Transactional DDL: the ALTERs were rolled back with the failure.
+    expect(columnNames(sqlite, 'matches')).not.toContain('fixture_id');
+    expect(columnNames(sqlite, 'matches')).not.toContain('stats');
+    expect(appliedVersions(db)).toEqual([1, 2]);
+    expect(indexNames(sqlite)).not.toContain('idx_match_events_match_id');
+
+    // The real v3 migration still applies cleanly afterwards.
+    runMigrations(db, MIGRATIONS);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+    expect(columnNames(sqlite, 'matches')).toContain('participant_ids');
+  });
+
+  it('does not rerun v3 when the database is already at the latest version', () => {
+    const { db, sqlite } = createRawDb();
+    initializeDatabaseSchema(db);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+
+    // A second run must be a no-op: the ALTERs would fail on duplicate
+    // columns if v3 were executed again.
+    initializeDatabaseSchema(db);
+    runMigrations(db, MIGRATIONS);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
+    const v3Records = (
+      db.select().from(schema.schemaMigrations).all() as any[]
+    ).filter((r) => r.version === 3);
+    expect(v3Records).toHaveLength(1);
+    expect(v3Records[0].name).toBe('add-match-persistence-columns');
+  });
+
+  it('matches and match_events columns match the Drizzle definitions', () => {
+    const { db, sqlite } = createRawDb();
+    initializeDatabaseSchema(db);
+
+    for (const table of [schema.matches, schema.matchEvents]) {
+      const tableName = getTableName(table);
+      const pragmaCols = sqlite
+        .prepare(`PRAGMA table_info(${tableName})`)
+        .all() as any[];
+      const drizzleCols = Object.values(getTableColumns(table));
+
+      expect(pragmaCols.map((c) => c.name).sort()).toEqual(
+        drizzleCols.map((c) => c.name).sort(),
+      );
+      for (const col of drizzleCols) {
+        const actual = pragmaCols.find((c) => c.name === col.name)!;
+        const effectivelyNullable = actual.notnull === 0 && actual.pk === 0;
+        expect(effectivelyNullable).toBe(!col.notNull);
+      }
+    }
+
+    // v3 nullable columns on matches.
+    const nullableMatchCols = (
+      sqlite.prepare('PRAGMA table_info(matches)').all() as any[]
+    )
+      .filter((c) => c.notnull === 0 && c.pk === 0)
+      .map((c) => c.name)
+      .sort();
+    expect(nullableMatchCols).toEqual([
+      'away_score',
+      'fixture_id',
+      'home_score',
+      'participant_ids',
+      'seed',
+      'stats',
+    ]);
+    const nullableEventCols = (
+      sqlite.prepare('PRAGMA table_info(match_events)').all() as any[]
+    )
+      .filter((c) => c.notnull === 0 && c.pk === 0)
+      .map((c) => c.name)
+      .sort();
+    expect(nullableEventCols).toEqual(['player_id', 'secondary_player_id']);
+  });
+});
+
 });

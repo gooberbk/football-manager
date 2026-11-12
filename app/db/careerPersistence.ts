@@ -1,5 +1,14 @@
 import * as schema from './schema';
 import { eq } from 'drizzle-orm';
+import {
+  compareMatchEventRows,
+  matchFromDbRows,
+  toMatchDbRow,
+  toMatchEventDbRows,
+  type MatchDbRow,
+  type MatchEventDbRow,
+  type PersistedMatch,
+} from './matchRecords';
 import type {
   Club,
   Player,
@@ -37,6 +46,19 @@ export interface CareerState {
    * to clear.
    */
   transferOffers: TransferOffer[];
+  /**
+   * Completed-match history (scores, stats, seeds, participants, events).
+   * Same runtime safeguard as transferOffers: an omitted (undefined)
+   * value means "not provided" and previously persisted match rows are
+   * left untouched; pass [] to clear the history explicitly. Providing
+   * an array replaces the whole history inside the save transaction.
+   *
+   * If the database contains match rows written before migration v3
+   * (fixture_id/stats/seed/participant_ids NULL — incomplete records the
+   * domain model cannot represent), replacing the history is REFUSED
+   * with an explicit error rather than silently dropping them.
+   */
+  matches?: PersistedMatch[];
 }
 
 export async function saveCareer(state: CareerState, dbInstance: any): Promise<void> {
@@ -239,6 +261,48 @@ export async function saveCareer(state: CareerState, dbInstance: any): Promise<v
           createdAt: offer.createdAt.getTime(),
           resolvedAt: offer.resolvedAt ? offer.resolvedAt.getTime() : null,
         }).run();
+      }
+    }
+
+    // Save match history (scores, stats, seeds, participants, events).
+    // Same contract as transferOffers: only rewrite when the caller
+    // provided the collection. Before replacing, refuse the operation if
+    // pre-v3 rows exist that the domain model cannot represent — they
+    // must never be silently dropped.
+    const matches: PersistedMatch[] | undefined = state.matches;
+    if (matches !== undefined) {
+      const existingMatchRows = tx
+        .select()
+        .from(schema.matches)
+        .all() as MatchDbRow[];
+      const incompleteCount = existingMatchRows.filter(
+        (row) =>
+          row.fixtureId === null ||
+          row.fixtureId === undefined ||
+          row.stats === null ||
+          row.stats === undefined ||
+          row.seed === null ||
+          row.seed === undefined ||
+          row.participantIds === null ||
+          row.participantIds === undefined,
+      ).length;
+      if (incompleteCount > 0) {
+        throw new Error(
+          `Cannot replace match history: ${incompleteCount} existing match ` +
+            'row(s) predate migration v3 and lack fixture_id/stats/seed/' +
+            'participant_ids. They cannot be represented by the domain ' +
+            'model and would be silently dropped. Resolve them manually ' +
+            'before saving match records.',
+        );
+      }
+
+      tx.delete(schema.matchEvents).run();
+      tx.delete(schema.matches).run();
+      for (const match of matches) {
+        tx.insert(schema.matches).values(toMatchDbRow(match)).run();
+        for (const eventRow of toMatchEventDbRows(match)) {
+          tx.insert(schema.matchEvents).values(eventRow).run();
+        }
       }
     }
   });
@@ -444,6 +508,36 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
           : undefined,
     }));
 
+    // Load match history. Rows written before migration v3 (NULL
+    // fixture_id/stats/seed/participant_ids) cannot be represented by
+    // PersistedMatch and are filtered out — never backfilled. Matches are
+    // ordered by date then id; events by minute, then event type, then
+    // the NUMERIC occurrence suffix of their deterministic id — a plain
+    // lexicographic id sort would order occurrences 0, 1, 10, 11, 2, ...
+    // (per-type occurrence order is preserved; the engine's exact
+    // cross-type intra-minute order is not persisted and is not restored).
+    const matchRecords = (await dbInstance.select().from(schema.matches)) as MatchDbRow[];
+    const eventRecords = (await dbInstance
+      .select()
+      .from(schema.matchEvents)) as MatchEventDbRow[];
+
+    const eventsByMatchId = new Map<string, MatchEventDbRow[]>();
+    const sortedEventRecords = [...eventRecords].sort(compareMatchEventRows);
+    for (const eventRow of sortedEventRecords) {
+      const list = eventsByMatchId.get(eventRow.matchId) ?? [];
+      list.push(eventRow);
+      eventsByMatchId.set(eventRow.matchId, list);
+    }
+
+    const matches: PersistedMatch[] = matchRecords
+      .map((row) => matchFromDbRows(row, eventsByMatchId.get(row.id) ?? []))
+      .filter((m): m is PersistedMatch => m !== null)
+      .sort((a, b) => {
+        const timeDiff = a.date.getTime() - b.date.getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+
     return {
       career: {
         id: careerRecord.id,
@@ -459,6 +553,7 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
       season,
       transferHistory,
       transferOffers,
+      matches,
     };
   } catch (error) {
     // Only a missing career row returns null (handled above). Any other

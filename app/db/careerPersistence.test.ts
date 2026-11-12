@@ -5,10 +5,13 @@ import type {
   Player,
   League,
   Season,
+  Fixture,
+  MatchResult,
   TransferRecord,
   TransferOffer,
   StandingEntry,
 } from '@club-director/shared-types';
+import { buildPersistedMatch, type PersistedMatch } from './matchRecords';
 import { saveCareer, loadCareer, deleteCareer } from './careerPersistence';
 import { getTestDatabase, resetTestDatabase } from './testDatabase';
 import * as schema from './schema';
@@ -801,6 +804,268 @@ describe('Career Persistence (Real SQLite)', () => {
     });
   });
 
+  describe('match persistence', () => {
+    const buildMatchRecord = (
+      state: ReturnType<typeof buildState>,
+      fixtureId: string,
+      date: Date,
+      events?: MatchResult['events'],
+    ): PersistedMatch => {
+      const fixture: Fixture = {
+        id: fixtureId,
+        homeClubId: state.clubs[0].id,
+        awayClubId: state.clubs[1].id,
+        week: 1,
+        date,
+        played: true,
+        homeScore: 2,
+        awayScore: 1,
+      };
+      const league: League = { ...state.league, fixtures: [fixture] };
+      const result: MatchResult = {
+        homeScore: 2,
+        awayScore: 1,
+        events: events ?? [
+          {
+            id: 'ev-g',
+            minute: 12,
+            type: 'goal',
+            primaryPlayerId: state.players[0].id,
+            secondaryPlayerId: state.players[1].id,
+            team: 'home',
+            description: 'GOAL!',
+          },
+          {
+            id: 'ev-s',
+            minute: 55,
+            type: 'save',
+            primaryPlayerId: state.players[5].id,
+            team: 'away',
+            description: 'SAVE!',
+          },
+        ],
+        stats: {
+          home: {
+            possession: 55, shots: 12, shotsOnTarget: 5, corners: 6,
+            fouls: 8, yellowCards: 1, redCards: 0,
+          },
+          away: {
+            possession: 45, shots: 7, shotsOnTarget: 3, corners: 2,
+            fouls: 10, yellowCards: 2, redCards: 0,
+          },
+        },
+        seed: 987654,
+        participantIds: [state.players[0].id, state.players[1].id],
+      };
+      return buildPersistedMatch({
+        fixture,
+        season: state.season,
+        league,
+        homeClub: state.clubs[0],
+        awayClub: state.clubs[1],
+        result,
+      });
+    };
+
+    it('round-trips multiple matches and events losslessly', async () => {
+      const state = buildState();
+      const matchA = buildMatchRecord(state, 'fixture-a', new Date('2024-08-10T15:00:00Z'));
+      const matchB = buildMatchRecord(state, 'fixture-b', new Date('2024-08-17T15:00:00Z'));
+
+      await saveCareer({ ...state, matches: [matchB, matchA] }, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.matches).toHaveLength(2);
+      // Ordered by date then id.
+      expect(loaded!.matches![0].id).toBe(matchA.id);
+      expect(loaded!.matches![1].id).toBe(matchB.id);
+      expect(loaded!.matches![0]).toEqual(matchA);
+      expect(loaded!.matches![1]).toEqual(matchB);
+      // secondaryPlayerId preserved (present and null).
+      const events = loaded!.matches![0].events;
+      expect(events[0].secondaryPlayerId).toBe(state.players[1].id);
+      expect(events[1].secondaryPlayerId).toBeNull();
+      expect(events[0].team).toBe('home');
+      expect(events[1].team).toBe('away');
+    });
+
+    it('saving twice replaces matches without duplicates', async () => {
+      const state = buildState();
+      const match = buildMatchRecord(state, 'fixture-a', new Date('2024-08-10T15:00:00Z'));
+
+      await saveCareer({ ...state, matches: [match] }, testDb);
+      await saveCareer({ ...state, matches: [match] }, testDb);
+
+      const matchRows = await testDb.select().from(schema.matches);
+      const eventRows = await testDb.select().from(schema.matchEvents);
+      expect(matchRows).toHaveLength(1);
+      expect(eventRows).toHaveLength(2);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.matches).toHaveLength(1);
+    });
+
+    it('preserves match rows when the save omits matches', async () => {
+      const state = buildState();
+      const match = buildMatchRecord(state, 'fixture-a', new Date('2024-08-10T15:00:00Z'));
+
+      await saveCareer({ ...state, matches: [match] }, testDb);
+      // Second save provides no matches collection at all.
+      const { matches: _omitted, ...stateWithoutMatches } = { ...state, matches: [match] };
+      await saveCareer(stateWithoutMatches, testDb);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.matches).toHaveLength(1);
+      expect(loaded!.matches![0].id).toBe(match.id);
+    });
+
+    it('clears the match history explicitly with matches: []', async () => {
+      const state = buildState();
+      const match = buildMatchRecord(state, 'fixture-a', new Date('2024-08-10T15:00:00Z'));
+
+      await saveCareer({ ...state, matches: [match] }, testDb);
+      await saveCareer({ ...state, matches: [] }, testDb);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.matches).toEqual([]);
+      expect(await testDb.select().from(schema.matchEvents)).toHaveLength(0);
+    });
+
+    it('loads matches: [] for a career saved without any matches', async () => {
+      const state = buildState();
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.matches).toEqual([]);
+    });
+
+    it('rolls back the entire save when a match event insert fails', async () => {
+      const state = buildState();
+      const match = buildMatchRecord(state, 'fixture-a', new Date('2024-08-10T15:00:00Z'));
+
+      testDb.run(`
+        CREATE TRIGGER fail_match_event_test
+        BEFORE INSERT ON match_events
+        BEGIN
+          SELECT RAISE(ABORT, 'injected event insert failure');
+        END
+      `);
+
+      await expect(
+        saveCareer({ ...state, matches: [match] }, testDb),
+      ).rejects.toThrow(/injected event insert failure/);
+
+      // Nothing was persisted: not the match, not its events, and none of
+      // the other career data either (single transaction).
+      expect(await testDb.select().from(schema.matches)).toHaveLength(0);
+      expect(await testDb.select().from(schema.matchEvents)).toHaveLength(0);
+      expect(await testDb.select().from(schema.players)).toHaveLength(0);
+      expect(await loadCareer(testDb)).toBeNull();
+
+      testDb.run('DROP TRIGGER IF EXISTS fail_match_event_test');
+    });
+
+    it('refuses to replace history when pre-v3 incomplete rows exist', async () => {
+      const state = buildState();
+      // Simulate a pre-v3 match row: v3 columns left NULL.
+      testDb.insert(schema.matches).values({
+        id: 'match-legacy-1',
+        homeClubId: state.clubs[0].id,
+        awayClubId: state.clubs[1].id,
+        seasonId: 'season-1',
+        date: 1722470400000,
+        status: 'completed',
+        homeScore: 1,
+        awayScore: 0,
+        homeTactics: '{}',
+        awayTactics: '{}',
+        fixtureId: null,
+        stats: null,
+        seed: null,
+        participantIds: null,
+      }).run();
+
+      const match = buildMatchRecord(state, 'fixture-a', new Date('2024-08-10T15:00:00Z'));
+      await expect(
+        saveCareer({ ...state, matches: [match] }, testDb),
+      ).rejects.toThrow(/predate migration v3/);
+
+      // The legacy row is still there — nothing was silently dropped.
+      const rows = await testDb.select().from(schema.matches);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe('match-legacy-1');
+    });
+
+
+    it('preserves numeric occurrence order for 12+ same-type same-minute events', async () => {
+      const state = buildState();
+      // 12 goal events at the same minute — occurrence suffixes 0..11.
+      // A lexicographic id sort would reorder them 0,1,10,11,2,...
+      const events: MatchResult['events'] = Array.from({ length: 12 }, (_, i) => ({
+        id: `ev-${i}`,
+        minute: 30,
+        type: 'goal' as const,
+        primaryPlayerId: state.players[i % state.players.length].id,
+        team: 'home' as const,
+        description: `goal-${i}`,
+      }));
+      const match = buildMatchRecord(
+        state,
+        'fixture-many',
+        new Date('2024-08-10T15:00:00Z'),
+        events,
+      );
+
+      await saveCareer({ ...state, matches: [match] }, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.matches).toHaveLength(1);
+      const loadedEvents = loaded!.matches![0].events;
+      expect(loadedEvents).toHaveLength(12);
+      // Occurrence order restored numerically: descriptions goal-0..goal-11
+      // in order, and ids end with :0..:11 respectively.
+      loadedEvents.forEach((event, i) => {
+        expect(event.description).toBe(`goal-${i}`);
+        expect(event.id.endsWith(`:30:goal:${i}`)).toBe(true);
+        expect(event.minute).toBe(30);
+        expect(event.type).toBe('goal');
+      });
+      // Ids are unique and fully preserved.
+      expect(new Set(loadedEvents.map((e) => e.id)).size).toBe(12);
+    });
+
+    it('filters pre-v3 incomplete rows out of the loaded matches', async () => {
+      const state = buildState();
+      const match = buildMatchRecord(state, 'fixture-a', new Date('2024-08-10T15:00:00Z'));
+      await saveCareer({ ...state, matches: [match] }, testDb);
+
+      // Add a legacy incomplete row directly (bypassing the save guard).
+      testDb.insert(schema.matches).values({
+        id: 'match-legacy-2',
+        homeClubId: state.clubs[0].id,
+        awayClubId: state.clubs[1].id,
+        seasonId: 'season-1',
+        date: 1722470400000,
+        status: 'completed',
+        homeScore: 1,
+        awayScore: 0,
+        homeTactics: '{}',
+        awayTactics: '{}',
+        fixtureId: null,
+        stats: null,
+        seed: null,
+        participantIds: null,
+      }).run();
+
+      const loaded = await loadCareer(testDb);
+      // Only the complete v3 match is represented in the domain model.
+      expect(loaded!.matches).toHaveLength(1);
+      expect(loaded!.matches![0].id).toBe(match.id);
+      // The legacy row still exists in the database, untouched.
+      const rows = await testDb.select().from(schema.matches);
+      expect(rows).toHaveLength(2);
+    });
+  });
+
   describe('career deletion', () => {
     const careerTables = async () => ({
       career: await testDb.select().from(schema.career),
@@ -846,12 +1111,13 @@ describe('Career Persistence (Real SQLite)', () => {
       await saveCareer({ ...state, transferOffers: [offer] }, testDb);
       seedMatchData(state);
 
-      // Seed migration metadata — infrastructure that must survive.
-      testDb.insert(schema.schemaMigrations).values({
-        version: 1,
-        name: 'baseline-schema',
-        appliedAt: 1,
-      }).run();
+      // Migration metadata — infrastructure that must survive. The test
+      // database is initialized through the real migration framework, so
+      // version records already exist.
+      const migrationsBefore = await testDb
+        .select()
+        .from(schema.schemaMigrations);
+      expect(migrationsBefore.length).toBeGreaterThan(0);
 
       await deleteCareer(testDb);
 
@@ -866,8 +1132,7 @@ describe('Career Persistence (Real SQLite)', () => {
 
       // Migration metadata is untouched.
       const migrations = await testDb.select().from(schema.schemaMigrations);
-      expect(migrations).toHaveLength(1);
-      expect(migrations[0].version).toBe(1);
+      expect(migrations).toEqual(migrationsBefore);
     });
 
     it('rolls back the entire deletion when a delete fails', async () => {

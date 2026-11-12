@@ -38,6 +38,7 @@ export function ensureCareerBoot(): Promise<CareerBootResult> {
           store.setPlayers(careerState.players);
           store.setTransferHistory(careerState.transferHistory);
           store.setTransferOffers(careerState.transferOffers ?? []);
+          store.setMatches(careerState.matches ?? []);
           store.setManagedClubId(careerState.career.managedClubId);
           result = 'loaded';
         } else {

@@ -72,6 +72,7 @@ export async function createCareer(clubIndex: number): Promise<void> {
     season,
     transferHistory: [],
     transferOffers: [],
+    matches: [],
   };
 
   await saveCareer(careerState);
@@ -85,6 +86,7 @@ export async function createCareer(clubIndex: number): Promise<void> {
   store.setManagedClubId(selectedClub.id);
   store.setTransferHistory([]);
   store.setTransferOffers([]);
+  store.setMatches([]);
   store.setResultsHistory([]);
   store.setBootStatus('loaded');
   store.setIsLoading(false);

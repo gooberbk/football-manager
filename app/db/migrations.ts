@@ -55,6 +55,33 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'add-match-persistence-columns',
+    up: (tx) => {
+      // Lossless match persistence (Phase 2C). All columns are nullable:
+      // ALTER TABLE cannot add NOT NULL columns to a non-empty table, and
+      // pre-v3 rows have no recorded values — they must stay NULL rather
+      // than receive invented stats, seeds, fixture ids or participant
+      // lists. No UNIQUE constraint on fixture_id: fixture ids are only
+      // unique within a league/season context, and matches.id (PK)
+      // already encodes the (league, season, fixture) tuple.
+      tx.run('ALTER TABLE matches ADD COLUMN fixture_id TEXT');
+      tx.run('ALTER TABLE matches ADD COLUMN stats TEXT');
+      tx.run('ALTER TABLE matches ADD COLUMN seed INTEGER');
+      tx.run('ALTER TABLE matches ADD COLUMN participant_ids TEXT');
+      tx.run('ALTER TABLE match_events ADD COLUMN secondary_player_id TEXT');
+      // Join key used when loading events for a match.
+      tx.run(
+        'CREATE INDEX idx_match_events_match_id ON match_events(match_id)',
+      );
+      // Season-scoped fixture lookup is the real query pattern; a
+      // composite index serves it without assuming fixture-id uniqueness.
+      tx.run(
+        'CREATE INDEX idx_matches_season_fixture ON matches(season_id, fixture_id)',
+      );
+    },
+  },
 ];
 
 /** Latest schema version supported by this build of the app. */
@@ -258,6 +285,68 @@ const LEGACY_BASELINE_TABLES = [
   schema.career,
 ];
 
+/**
+ * Frozen snapshot of the column names each baseline table had at schema
+ * version 1. This is deliberately NOT derived from schema.ts: schema.ts
+ * describes the CURRENT schema, which gains columns via migrations (e.g.
+ * v3 added columns to matches/match_events). A pre-framework legacy
+ * database only ever had the v1 columns, so validating it against the
+ * current Drizzle definitions would wrongly reject a compatible career
+ * database. The baseline schema is immutable by definition, so this
+ * snapshot is safe to hardcode; it must only change if a NEW baseline is
+ * ever introduced (which would be a new framework, not an edit here).
+ */
+const BASELINE_V1_COLUMNS: Record<string, string[]> = {
+  players: [
+    'id', 'first_name', 'last_name', 'nationality', 'age',
+    'preferred_foot', 'primary_position', 'secondary_positions',
+    'passing', 'shooting', 'dribbling', 'tackling', 'heading', 'crossing',
+    'finishing', 'technique', 'long_shots', 'free_kicks', 'first_touch',
+    'vision', 'decisions', 'composure', 'anticipation', 'positioning',
+    'work_rate', 'determination', 'leadership', 'concentration', 'flair',
+    'pace', 'acceleration', 'stamina', 'strength', 'agility', 'balance',
+    'jumping', 'natural_fitness', 'current_ability', 'potential_ability',
+    'age_growth_curve', 'morale', 'recent_form', 'fitness', 'injury_type',
+    'injury_days_remaining', 'injury_severity', 'club_id', 'wage',
+    'contract_expiry_date', 'market_value',
+  ],
+  clubs: [
+    'id', 'name', 'nickname', 'founded_year', 'reputation', 'balance',
+    'transfer_budget', 'wage_budget', 'weekly_income', 'stadium_name',
+    'stadium_capacity', 'default_formation', 'mentality',
+    'pressing_intensity', 'tempo', 'width',
+  ],
+  leagues: ['id', 'name', 'tier', 'club_ids'],
+  league_standings: [
+    'id', 'league_id', 'club_id', 'played', 'won', 'drawn', 'lost',
+    'goals_for', 'goals_against', 'goal_difference', 'points',
+  ],
+  fixtures: [
+    'id', 'league_id', 'home_club_id', 'away_club_id', 'week', 'date',
+    'played', 'home_score', 'away_score',
+  ],
+  seasons: [
+    'id', 'league_id', 'current_week', 'current_date',
+    'transfer_window_open',
+  ],
+  matches: [
+    'id', 'home_club_id', 'away_club_id', 'season_id', 'date', 'status',
+    'home_score', 'away_score', 'home_tactics', 'away_tactics',
+  ],
+  match_events: [
+    'id', 'match_id', 'minute', 'type', 'player_id', 'club_id',
+    'description',
+  ],
+  transfers: [
+    'id', 'player_id', 'from_club_id', 'to_club_id', 'fee', 'type',
+    'date', 'status',
+  ],
+  career: [
+    'id', 'manager_name', 'managed_club_id', 'created_at', 'last_played_at',
+    'schema_version',
+  ],
+};
+
 function ensureSchemaMigrationsTable(dbInstance: any): void {
   dbInstance.run(SCHEMA_MIGRATIONS_DDL);
 }
@@ -308,12 +397,13 @@ function validateSchemaMigrationsTable(dbInstance: any): void {
  * Validate that a database with NO migration metadata is a compatible
  * version-1 legacy database before the baseline version is recorded.
  *
- * Every baseline table must exist and contain every column the application
- * reads and writes (derived from the Drizzle schema, so schema.ts remains
- * the single source of truth). Extra columns are tolerated; missing tables
- * or columns mean the database is partial or incompatible — in that case we
- * throw WITHOUT creating missing tables, recording a version, or touching
- * any existing data.
+ * Every baseline table must exist and contain every column it had at
+ * schema version 1 (see BASELINE_V1_COLUMNS — a frozen snapshot, NOT the
+ * current Drizzle schema, so columns added by later migrations do not
+ * make a valid legacy database look incompatible). Extra columns are
+ * tolerated; missing tables or columns mean the database is partial or
+ * incompatible — in that case we throw WITHOUT creating missing tables,
+ * recording a version, or touching any existing data.
  */
 function validateLegacySchema(dbInstance: any): void {
   const problems: string[] = [];
@@ -332,9 +422,11 @@ function validateLegacySchema(dbInstance: any): void {
       `PRAGMA table_info('${tableName}')`,
     ) as any[];
     const actualColumns = new Set(columnRows.map((row) => row.name as string));
-    const expectedColumns = Object.values(getTableColumns(table)).map(
-      (column) => column.name,
-    );
+    const expectedColumns = BASELINE_V1_COLUMNS[tableName] ?? [];
+    if (expectedColumns.length === 0) {
+      problems.push(`no baseline column snapshot for table '${tableName}'`);
+      continue;
+    }
     const missingColumns = expectedColumns.filter(
       (name) => !actualColumns.has(name),
     );

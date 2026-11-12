@@ -133,6 +133,12 @@ export const matches = sqliteTable('matches', {
   awayScore: integer('away_score'),
   homeTactics: text('home_tactics').notNull(),
   awayTactics: text('away_tactics').notNull(),
+  // Added by migration v3 — nullable: rows written before v3 have no
+  // recorded values and must never be backfilled with invented data.
+  fixtureId: text('fixture_id'),
+  stats: text('stats'),
+  seed: integer('seed'),
+  participantIds: text('participant_ids'),
 });
 
 export const matchEvents = sqliteTable('match_events', {
@@ -141,6 +147,8 @@ export const matchEvents = sqliteTable('match_events', {
   minute: integer('minute').notNull(),
   type: text('type').notNull(),
   playerId: text('player_id'),
+  // Added by migration v3 — nullable for pre-v3 rows.
+  secondaryPlayerId: text('secondary_player_id'),
   clubId: text('club_id').notNull(),
   description: text('description').notNull(),
 });
