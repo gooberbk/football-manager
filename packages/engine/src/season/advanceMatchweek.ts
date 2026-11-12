@@ -9,7 +9,7 @@ import {
   TransferOffer,
   TransferRecord,
 } from '@club-director/shared-types';
-import { simulateMatch } from '../match/simulation';
+import { simulateMatch, SeededRNG } from '../match/simulation';
 import { computeStandings } from './standings';
 import { processAITransferActivity } from '../transfer/market';
 
@@ -35,6 +35,21 @@ export interface MatchweekAdvancement {
 export interface AdvanceMatchweekOptions {
   /** Club that must not participate as an AI buyer (the managed club). */
   managedClubId?: string;
+}
+
+/**
+ * Deterministic 32-bit hash (FNV-1a) mapping a stable string key to a
+ * non-negative seed for SeededRNG. Match seeds derive from league +
+ * fixture identity so identical career states always replay identically,
+ * while different fixtures get independent streams.
+ */
+function hashSeed(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
 }
 
 /**
@@ -80,8 +95,18 @@ export function advanceMatchweek(
     const homeClub = clubs.find((c) => c.id === fixture.homeClubId);
     const awayClub = clubs.find((c) => c.id === fixture.awayClubId);
 
-    if (!homeClub || !awayClub) {
-      return;
+    // A fixture referencing a missing club must fail loudly: silently
+    // skipping it would orphan the fixture (its week is never revisited)
+    // and corrupt the standings without any visible error.
+    if (!homeClub) {
+      throw new Error(
+        `Cannot simulate fixture ${fixture.id}: missing home club ${fixture.homeClubId}`,
+      );
+    }
+    if (!awayClub) {
+      throw new Error(
+        `Cannot simulate fixture ${fixture.id}: missing away club ${fixture.awayClubId}`,
+      );
     }
 
     const homePlayerMap: PlayerMap = {};
@@ -99,13 +124,15 @@ export function advanceMatchweek(
       }
     });
 
-    // Simulate match
+    // Simulate match — the seed derives from stable fixture identity, so
+    // the same career state always replays the same match.
+    const matchSeed = hashSeed(`${season.id}|${league.id}|${fixture.id}`);
     const result = simulateMatch(
       homeClub,
       awayClub,
       homePlayerMap,
       awayPlayerMap,
-      Date.now(),
+      matchSeed,
     );
 
     // Record result
@@ -140,8 +167,17 @@ export function advanceMatchweek(
     }),
   };
 
-  // Apply post-match effects to players
-  const updatedPlayers = applyPostMatchEffects(players, results, clubs);
+  // Deterministic randomness for everything downstream of the matches:
+  // post-match effects and AI transfer decisions each get their own
+  // seeded stream derived from stable season/week identity. `transferNow`
+  // pins offer/record/contract timestamps to the season date so identical
+  // inputs produce deeply equal outputs.
+  const effectsRng = new SeededRNG(hashSeed(`${season.id}|${currentWeek}|effects`));
+  const transferRng = new SeededRNG(hashSeed(`${season.id}|${currentWeek}|transfers`));
+  const transferNow = new Date(season.currentDate);
+
+  // Apply post-match effects to players — scoped to actual participants.
+  const updatedPlayers = applyPostMatchEffects(players, results, effectsRng);
 
   // Process AI transfer activity on a copy of the clubs array (the engine
   // mutates it in place for accepted transfers), so callers' arrays are not
@@ -155,6 +191,7 @@ export function advanceMatchweek(
     season.transferWindowOpen,
     options?.managedClubId ? [options.managedClubId] : [],
     transferRecords,
+    { rng: transferRng, now: transferNow },
   );
 
   // Advance season
@@ -172,12 +209,16 @@ export function advanceMatchweek(
 }
 
 /**
- * Apply post-match effects to players who participated in matches.
+ * Apply post-match effects to players who actually participated in matches.
+ * Participation comes from each MatchResult's explicit participantIds (the
+ * starting XIs chosen by simulateMatch) — squad members who did not play
+ * receive no fatigue, no match rating, and no match-derived form entry;
+ * they only get the standard non-participant recovery below.
  */
 function applyPostMatchEffects(
   players: Player[],
   results: MatchweekResult[],
-  clubs: Club[],
+  rng: SeededRNG,
 ): Player[] {
   const updatedPlayers = new Map<string, Player>();
 
@@ -194,23 +235,23 @@ function applyPostMatchEffects(
     });
   });
 
-  // Process each match result
+  // Every player who took part in any simulated match this week.
+  const allParticipantIds = new Set<string>();
   results.forEach((matchResult) => {
-    const homeClub = clubs.find((c) => c.id === matchResult.homeClubId);
-    const awayClub = clubs.find((c) => c.id === matchResult.awayClubId);
+    matchResult.result.participantIds.forEach((id) => allParticipantIds.add(id));
+  });
 
-    if (!homeClub || !awayClub) return;
+  // Process each match result — effects apply only to that match's
+  // participants, never to the rest of the squad.
+  results.forEach((matchResult) => {
+    const participantIds = new Set(matchResult.result.participantIds);
 
-    const homePlayers = homeClub.squad;
-    const awayPlayers = awayClub.squad;
-    const allParticipants = [...homePlayers, ...awayPlayers];
-
-    allParticipants.forEach((playerId) => {
+    participantIds.forEach((playerId) => {
       const player = updatedPlayers.get(playerId);
       if (!player) return;
 
       // Reduce fitness based on playing
-      const fitnessReduction = 5 + Math.random() * 10; // 5-15% reduction
+      const fitnessReduction = 5 + rng.next() * 10; // 5-15% reduction
       player.status.fitness = Math.max(0, Math.min(100, player.status.fitness - fitnessReduction));
 
       // Check for injuries from match events
@@ -219,17 +260,23 @@ function applyPostMatchEffects(
       );
 
       if (injuryEvent) {
-        const injuryDays = Math.floor(7 + Math.random() * 21); // 7-28 days
+        const injuryDays = Math.floor(7 + rng.next() * 21); // 7-28 days
         player.status.injury = {
           type: 'Match injury',
           daysRemaining: injuryDays,
           severity: injuryDays > 21 ? 'serious' : injuryDays > 14 ? 'moderate' : 'minor',
         };
         player.status.fitness = Math.max(0, Math.min(100, player.status.fitness - 20));
+      } else if (player.status.injury && player.status.injury.daysRemaining <= 0) {
+        // A participant cannot carry an active injury into selection, so
+        // any injury object left here is stale (already healed) — clear it.
+        // A NEW injury set above is never decremented during the week it
+        // was inflicted.
+        player.status.injury = null;
       }
 
       // Update recent form (implied match rating)
-      const matchRating = calculateMatchRating(player, matchResult.result);
+      const matchRating = calculateMatchRating(player, matchResult.result, rng);
       player.status.recentForm = [
         matchRating,
         ...player.status.recentForm.slice(0, 4),
@@ -239,22 +286,20 @@ function applyPostMatchEffects(
     });
   });
 
-  // Apply recovery to non-playing players
+  // Apply recovery to non-participants (players who did not play any match
+  // this week, including all reserves).
   Array.from(updatedPlayers.values()).forEach((player) => {
-    const playedInMatches = results.some((r) => {
-      const homeClub = clubs.find((c) => c.id === r.homeClubId);
-      const awayClub = clubs.find((c) => c.id === r.awayClubId);
-      if (!homeClub || !awayClub) return false;
-      return [...homeClub.squad, ...awayClub.squad].includes(player.id);
-    });
-
-    if (!playedInMatches) {
+    if (!allParticipantIds.has(player.id)) {
       // Fitness recovery for non-playing players
       player.status.fitness = Math.max(0, Math.min(100, player.status.fitness + 10));
 
-      // Injury recovery
+      // Injury recovery: one simulated week = 7 days. The counter is
+      // clamped at zero and the injury object is removed once healed.
       if (player.status.injury) {
-        player.status.injury.daysRemaining--;
+        player.status.injury.daysRemaining = Math.max(
+          0,
+          player.status.injury.daysRemaining - 7,
+        );
         if (player.status.injury.daysRemaining <= 0) {
           player.status.injury = null;
         }
@@ -282,9 +327,12 @@ function applyNonPlayingEffects(players: Player[]): Player[] {
     // Fitness recovery
     updatedPlayer.status.fitness = Math.min(100, updatedPlayer.status.fitness + 10);
 
-    // Injury recovery
+    // Injury recovery: one simulated week = 7 days, clamped at zero.
     if (updatedPlayer.status.injury) {
-      updatedPlayer.status.injury.daysRemaining--;
+      updatedPlayer.status.injury.daysRemaining = Math.max(
+        0,
+        updatedPlayer.status.injury.daysRemaining - 7,
+      );
       if (updatedPlayer.status.injury.daysRemaining <= 0) {
         updatedPlayer.status.injury = null;
       }
@@ -297,7 +345,7 @@ function applyNonPlayingEffects(players: Player[]): Player[] {
 /**
  * Calculate an implied match rating for a player based on their role in the match.
  */
-function calculateMatchRating(player: Player, result: MatchResult): number {
+function calculateMatchRating(player: Player, result: MatchResult, rng: SeededRNG): number {
   // Count goals and assists for this player
   const goals = result.events.filter(
     (e) => e.type === 'goal' && e.primaryPlayerId === player.id,
@@ -313,8 +361,8 @@ function calculateMatchRating(player: Player, result: MatchResult): number {
   // Adjust for match performance
   const performanceBonus = goals * 1.5 + assists * 1.0;
 
-  // Random variation
-  const variation = (Math.random() - 0.5) * 2;
+  // Random variation (seeded — deterministic per matchweek)
+  const variation = (rng.next() - 0.5) * 2;
 
   const finalRating = Math.max(1, Math.min(10, baseRating + performanceBonus + variation));
 

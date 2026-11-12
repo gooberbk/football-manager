@@ -34,6 +34,9 @@ export class SeededRNG {
 
   // Returns a random element from an array
   nextChoice<T>(array: T[]): T {
+    if (array.length === 0) {
+      throw new Error('SeededRNG.nextChoice: cannot choose from an empty array');
+    }
     return array[this.nextInt(0, array.length)];
   }
 
@@ -120,7 +123,12 @@ export function simulateMatch(
     rng,
   );
 
-  const result = aggregateResults(phases, homeClub.id, awayClub.id, actualSeed);
+  const participantIds = [
+    ...homeStartingXI.players.map((p) => p.id),
+    ...awayStartingXI.players.map((p) => p.id),
+  ];
+
+  const result = aggregateResults(phases, homeClub.id, awayClub.id, actualSeed, participantIds);
   return result;
 }
 
@@ -237,6 +245,20 @@ function applyTacticalModifiers(strength: TeamStrength, tactics: ClubTactics): v
 function selectStartingXI(club: Club, players: PlayerMap, formation: Formation): StartingXI {
   const squadPlayers = club.squad.map((id) => players[id]).filter((p) => p !== undefined);
 
+  // Players with an active injury are unavailable and must never be
+  // selected, not even as a fallback. Selection proceeds from the eligible
+  // pool only; a squad that cannot field 11 eligible players fails loudly.
+  const eligiblePlayers = squadPlayers.filter(
+    (p) => !p.status.injury || p.status.injury.daysRemaining <= 0,
+  );
+
+  if (eligiblePlayers.length < 11) {
+    throw new Error(
+      `Club ${club.id} cannot field a starting XI: ${eligiblePlayers.length} eligible players ` +
+        `(need 11, squad size ${squadPlayers.length})`,
+    );
+  }
+
   const getPositionRequirements = (formation: Formation): { [key: string]: number } => {
     switch (formation) {
       case '4-4-2':
@@ -262,7 +284,7 @@ function selectStartingXI(club: Club, players: PlayerMap, formation: Formation):
 
   const requirements = getPositionRequirements(formation);
   const selected: Player[] = [];
-  const available = [...squadPlayers];
+  const available = [...eligiblePlayers];
 
   // Select goalkeeper first
   const gks = available.filter((p) => p.primaryPosition === 'GK');
@@ -315,6 +337,20 @@ function selectStartingXI(club: Club, players: PlayerMap, formation: Formation):
   const defenders = selected.filter((p) => ['CB', 'FB'].includes(p.primaryPosition));
   const midfielders = selected.filter((p) => ['CM', 'DM', 'AM'].includes(p.primaryPosition));
   const forwards = selected.filter((p) => ['ST', 'W'].includes(p.primaryPosition));
+
+  // Event generation dereferences these groups unconditionally (corner
+  // takers, foul defenders/attackers, save keepers). A degenerate squad
+  // that produces an empty group must fail here — before any undefined
+  // player can be dereferenced deep inside phase simulation.
+  if (!gk) {
+    throw new Error(`Club ${club.id}: starting XI selection produced no goalkeeper`);
+  }
+  if (defenders.length === 0) {
+    throw new Error(`Club ${club.id}: starting XI has no eligible defenders`);
+  }
+  if (midfielders.length + forwards.length === 0) {
+    throw new Error(`Club ${club.id}: starting XI has no eligible attackers or midfielders`);
+  }
 
   return {
     players: selected,
@@ -699,6 +735,7 @@ function aggregateResults(
   homeClubId: string,
   awayClubId: string,
   seed: number,
+  participantIds: string[],
 ): MatchResult {
   const events: MatchEvent[] = [];
   let homeScore = 0;
@@ -794,5 +831,6 @@ function aggregateResults(
       away: awayStats,
     },
     seed,
+    participantIds,
   };
 }

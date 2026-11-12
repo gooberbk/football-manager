@@ -6,6 +6,26 @@ import {
   TransferRecord,
 } from '@club-director/shared-types';
 import { calculateMarketValue } from './valuation';
+import { SeededRNG } from '../match/simulation';
+
+/**
+ * Optional determinism context for transfer operations. When `rng`/`now`
+ * are supplied (e.g. by advanceMatchweek), IDs, wages, contract lengths
+ * and timestamps become fully deterministic; when omitted, behavior is
+ * unchanged for interactive callers.
+ */
+export interface TransferRandomContext {
+  rng?: SeededRNG;
+  now?: Date;
+}
+
+function offerId(prefix: string, ctx?: TransferRandomContext): string {
+  const time = ctx?.now ? ctx.now.getTime() : Date.now();
+  const suffix = ctx?.rng
+    ? ctx.rng.nextInt(0, 4294967296).toString(36)
+    : Math.random().toString(36).substr(2, 9);
+  return `${prefix}-${time}-${suffix}`;
+}
 
 export interface TransferMarketState {
   offers: TransferOffer[];
@@ -29,6 +49,7 @@ export function makeOffer(
   offerAmount: number,
   existingOffers: TransferOffer[],
   transferWindowOpen: boolean,
+  ctx?: TransferRandomContext,
 ): MakeOfferResult {
   // Check if transfer window is open
   if (!transferWindowOpen) {
@@ -77,7 +98,7 @@ export function makeOffer(
     const updatedOffer: TransferOffer = {
       ...existingPendingOffer,
       offerAmount,
-      createdAt: new Date(),
+      createdAt: ctx?.now ?? new Date(),
     };
     return {
       success: true,
@@ -87,13 +108,13 @@ export function makeOffer(
 
   // Create new offer
   const newOffer: TransferOffer = {
-    id: `offer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    id: offerId('offer', ctx),
     playerId: player.id,
     buyingClubId: buyingClub.id,
     sellingClubId: sellingClub.id,
     offerAmount,
     status: 'pending',
-    createdAt: new Date(),
+    createdAt: ctx?.now ?? new Date(),
   };
 
   return {
@@ -150,6 +171,7 @@ export function executeTransfer(
   player: Player,
   allPlayers: Player[],
   transferHistory?: TransferRecord[],
+  ctx?: TransferRandomContext,
 ): {
   updatedBuyingClub: Club;
   updatedSellingClub: Club;
@@ -158,7 +180,8 @@ export function executeTransfer(
 } | null {
   // Calculate appropriate wage for the player based on ability
   const baseWage = (player.development.currentAbility / 200) * 200000; // 0-200K base
-  const wage = Math.round(baseWage + Math.random() * 50000); // Add some variance
+  const wageVariance = ctx?.rng ? ctx.rng.next() : Math.random();
+  const wage = Math.round(baseWage + wageVariance * 50000); // Add some variance
 
   // Check if buyer has sufficient wage budget
   const currentWageBill = calculateWageBill(buyingClub, allPlayers);
@@ -191,8 +214,8 @@ export function executeTransfer(
   };
 
   // Update player
-  const contractYears = 3 + Math.floor(Math.random() * 3); // 3-5 years
-  const contractExpiryDate = new Date();
+  const contractYears = 3 + (ctx?.rng ? ctx.rng.nextInt(0, 3) : Math.floor(Math.random() * 3)); // 3-5 years
+  const contractExpiryDate = new Date(ctx?.now ?? Date.now());
   contractExpiryDate.setFullYear(contractExpiryDate.getFullYear() + contractYears);
 
   const updatedPlayer: Player = {
@@ -208,12 +231,12 @@ export function executeTransfer(
 
   // Create transfer record
   const transferRecord: TransferRecord = {
-    id: `transfer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    id: offerId('transfer', ctx),
     playerId: player.id,
     fromClubId: sellingClub.id,
     toClubId: buyingClub.id,
     fee: offer.offerAmount,
-    date: new Date(),
+    date: ctx?.now ?? new Date(),
   };
 
   return {
@@ -256,6 +279,7 @@ export function processAITransferActivity(
   transferWindowOpen: boolean,
   excludedClubIds: string[] = [],
   transferHistory?: TransferRecord[],
+  ctx?: TransferRandomContext,
 ): TransferOffer[] {
   if (!transferWindowOpen) {
     return existingOffers;
@@ -282,7 +306,8 @@ export function processAITransferActivity(
       continue; // Managed club never participates as an AI buyer
     }
 
-    if (Math.random() > 0.15) {
+    const gateRoll = ctx?.rng ? ctx.rng.next() : Math.random();
+    if (gateRoll > 0.15) {
       continue; // Skip this club
     }
 
@@ -337,6 +362,7 @@ export function processAITransferActivity(
       offerAmount,
       newOffers,
       true,
+      ctx,
     );
 
     if (!result.success || !result.offer) {
@@ -352,7 +378,7 @@ export function processAITransferActivity(
       newOffers.push({
         ...result.offer,
         status: 'rejected',
-        resolvedAt: new Date(),
+        resolvedAt: ctx?.now ?? new Date(),
       });
       continue;
     }
@@ -365,6 +391,7 @@ export function processAITransferActivity(
       targetPlayer,
       players,
       transferHistory,
+      ctx,
     );
 
     if (!transferResult) {
@@ -394,7 +421,7 @@ export function processAITransferActivity(
     newOffers.push({
       ...result.offer,
       status: 'accepted',
-      resolvedAt: new Date(),
+      resolvedAt: ctx?.now ?? new Date(),
     });
   }
 

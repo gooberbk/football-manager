@@ -242,6 +242,12 @@ export interface MatchResult {
     away: MatchStats;
   };
   seed: number;
+  /**
+   * IDs of the players who actually started the match (home XI then away
+   * XI, in selection order). Post-match effects must be scoped to these
+   * participants — squad members who did not play are non-participants.
+   */
+  participantIds: string[];
 }
 
 
