@@ -35,6 +35,7 @@ function buildClub(id: string): Club {
       transferBudget: 5_000_000,
       wageBudget: 500_000,
       weeklyIncome: 100_000,
+      debt: 0,
     },
     squad: ['p1', 'p2'],
     stadium: { name: 'Stadium', capacity: 30_000 },

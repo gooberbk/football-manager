@@ -7,6 +7,14 @@ import { advanceMatchweek } from '../season/advanceMatchweek';
 import { generateSeedData } from '../seed/generateSeedData';
 import { League, Fixture, Season, Club, Player, StandingEntry } from '@club-director/shared-types';
 
+// Weekly economy (Phase 2E.3b) legitimately changes club finances every
+// matchweek; everything else about the clubs must remain identical.
+function expectClubsEqualExceptFinances(updated: Club[], original: Club[]) {
+  const strip = (cs: Club[]) =>
+    cs.map(({ finances: _finances, ...rest }) => rest);
+  expect(strip(updated)).toEqual(strip(original));
+}
+
 describe('Season Scheduling', () => {
   describe('generateFixtures', () => {
     it('should generate correct number of fixtures for N clubs', () => {
@@ -580,7 +588,7 @@ describe('Season Scheduling', () => {
       expect(advancement.results).toHaveLength(0);
       expect(advancement.updatedSeason.currentWeek).toBe(2);
       expect(advancement.updatedSeason.currentDate).toEqual(new Date('2024-08-08'));
-      expect(advancement.updatedClubs).toEqual(clubs);
+      expectClubsEqualExceptFinances(advancement.updatedClubs, clubs);
       expect(advancement.transferOffers).toEqual([]);
     });
 
@@ -623,7 +631,7 @@ describe('Season Scheduling', () => {
       expect(advancement.updatedLeague.fixtures[0].homeScore).toBeDefined();
       expect(advancement.updatedLeague.fixtures[0].awayScore).toBeDefined();
       expect(advancement.updatedSeason.currentWeek).toBe(2);
-      expect(advancement.updatedClubs).toEqual(clubs);
+      expectClubsEqualExceptFinances(advancement.updatedClubs, clubs);
       expect(advancement.transferOffers).toEqual([]);
     });
 
@@ -666,7 +674,7 @@ describe('Season Scheduling', () => {
       const updatedPlayer = advancement.updatedPlayers.find((p: Player) => p.id === players[0].id);
       expect(updatedPlayer).toBeDefined();
       expect(updatedPlayer?.status.fitness).toBeLessThan(initialFitness);
-      expect(advancement.updatedClubs).toEqual(clubs);
+      expectClubsEqualExceptFinances(advancement.updatedClubs, clubs);
       expect(advancement.transferOffers).toEqual([]);
     });
 
@@ -701,7 +709,7 @@ describe('Season Scheduling', () => {
       const updatedPlayer = advancement.updatedPlayers.find((p: Player) => p.id === players[0].id);
       expect(updatedPlayer).toBeDefined();
       expect(updatedPlayer?.status.fitness).toBeGreaterThan(50);
-      expect(advancement.updatedClubs).toEqual(clubs);
+      expectClubsEqualExceptFinances(advancement.updatedClubs, clubs);
       expect(advancement.transferOffers).toEqual([]);
     });
   });
@@ -824,7 +832,7 @@ describe('Season Scheduling', () => {
       const fitnessAfterRecovery = updatedPlayer?.status.fitness || 0;
 
       expect(fitnessAfterRecovery).toBeGreaterThan(fitnessAfterPlaying);
-      expect(advancement.updatedClubs).toEqual(clubs);
+      expectClubsEqualExceptFinances(advancement.updatedClubs, clubs);
       expect(advancement.transferOffers).toEqual([]);
     });
 

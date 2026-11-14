@@ -82,6 +82,56 @@ export const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 4,
+    name: 'add-club-debt-column',
+    up: (tx) => {
+      // Weekly economy (Phase 2E.3a): clubs can carry outstanding debt.
+      // NOT NULL DEFAULT 0 backfills every existing club with zero debt —
+      // pre-economy careers never accumulated any.
+      tx.run(
+        'ALTER TABLE clubs ADD COLUMN debt INTEGER NOT NULL DEFAULT 0',
+      );
+    },
+  },
+  {
+    version: 5,
+    name: 'add-season-objectives',
+    up: (tx) => {
+      // Season objectives (Phase 2E.3d): one row per club per season.
+      // target_position/reward_amount/ambition are fixed at season
+      // creation; settlement columns stay NULL until end-of-season
+      // settlement runs exactly once inside the rollover transaction.
+      // sanction only records deferred consequences — no dismissal or
+      // relegation is executed while those systems do not exist.
+      // CHECK constraints enforce the domain invariants the Drizzle
+      // schema cannot express; existing tables carry none, but the
+      // objective values are closed enums and bounded integers where a
+      // malformed row would corrupt financial settlement.
+      tx.run(`
+        CREATE TABLE season_objectives (
+          season_id TEXT NOT NULL,
+          club_id TEXT NOT NULL,
+          target_position INTEGER NOT NULL CHECK (target_position > 0),
+          reward_amount INTEGER NOT NULL CHECK (reward_amount >= 0),
+          ambition TEXT NOT NULL CHECK (ambition IN (
+            'title_favorite', 'title_contender', 'upper_table',
+            'mid_table', 'progression', 'survival'
+          )),
+          objective_met INTEGER
+            CHECK (objective_met IS NULL OR objective_met IN (0, 1)),
+          reward_paid INTEGER NOT NULL DEFAULT 0 CHECK (reward_paid >= 0),
+          debt_remaining INTEGER
+            CHECK (debt_remaining IS NULL OR debt_remaining >= 0),
+          settled_at INTEGER,
+          sanction TEXT NOT NULL DEFAULT 'none' CHECK (sanction IN (
+            'none', 'dismissal_relegation_pending'
+          )),
+          PRIMARY KEY (season_id, club_id)
+        )
+      `);
+    },
+  },
 ];
 
 /** Latest schema version supported by this build of the app. */

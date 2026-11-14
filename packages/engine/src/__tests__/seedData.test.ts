@@ -42,6 +42,7 @@ describe('generateSeedData', () => {
       expect(typeof club.foundedYear).toBe('number');
       expect(typeof club.reputation).toBe('number');
       expect(Array.isArray(club.squad)).toBe(true);
+      expect(club.finances.debt).toBe(0);
     });
   });
 

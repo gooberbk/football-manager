@@ -108,6 +108,8 @@ export interface ClubFinances {
   transferBudget: number;
   wageBudget: number;
   weeklyIncome: number;
+  /** Outstanding debt owed by the club (settlement rules: Phase 2E.3d). */
+  debt: number;
 }
 
 export interface Stadium {
@@ -281,6 +283,58 @@ export interface TransferOffer {
 }
 
 export type TransferOfferStatus = 'pending' | 'accepted' | 'rejected' | 'withdrawn';
+
+/**
+ * Ambition category assigned to a club at the start of a season
+ * (Phase 2E.3d). Determined once from relative squad strength and
+ * persisted — never recomputed during the season.
+ */
+export type SeasonAmbition =
+  | 'title_favorite'
+  | 'title_contender'
+  | 'upper_table'
+  | 'mid_table'
+  | 'progression'
+  | 'survival';
+
+/**
+ * Deferred sanction recorded when a club ends the season with
+ * unresolved debt (Phase 2E.3d). 'dismissal_relegation_pending' means
+ * the sanction is recorded but NOT executed: the manager-career and
+ * divisions systems do not exist yet, so nothing is actually applied.
+ * Executed states ('dismissed', 'relegated') belong to future phases.
+ */
+export type SeasonObjectiveSanction =
+  | 'none'
+  | 'dismissal_relegation_pending';
+
+/**
+ * A club's season objective: target league position, ambition category
+ * and the reward amount fixed at season start. `rewardAmount` is the
+ * sporting reward and the reference financial threshold — it is NOT a
+ * hard accounting cap: real debt is never truncated to respect it.
+ *
+ * Settlement fields stay null until the end-of-season settlement runs;
+ * they are written exactly once, inside the rollover transaction.
+ */
+export interface SeasonObjective {
+  seasonId: string;
+  clubId: string;
+  /** Target finishing position (1 = champion). Fixed at creation. */
+  targetPosition: number;
+  /** Reward amount fixed at creation. Never recomputed. */
+  rewardAmount: number;
+  ambition: SeasonAmbition;
+  /** null until settlement evaluates the final standing. */
+  objectiveMet: boolean | null;
+  /** Amount actually paid out at settlement (0 when objective missed). */
+  rewardPaid: number;
+  /** Debt left after settlement; null until settlement runs. */
+  debtRemaining: number | null;
+  /** Settlement timestamp; null until settlement runs. */
+  settledAt: Date | null;
+  sanction: SeasonObjectiveSanction;
+}
 
 export interface PlayerMap {
   [playerId: string]: Player;

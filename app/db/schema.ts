@@ -1,4 +1,9 @@
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import {
+  sqliteTable,
+  text,
+  integer,
+  primaryKey,
+} from 'drizzle-orm/sqlite-core';
 
 export const players = sqliteTable('players', {
   id: text('id').primaryKey(),
@@ -70,6 +75,7 @@ export const clubs = sqliteTable('clubs', {
   transferBudget: integer('transfer_budget').notNull(),
   wageBudget: integer('wage_budget').notNull(),
   weeklyIncome: integer('weekly_income').notNull(),
+  debt: integer('debt').notNull().default(0),
   // Stadium
   stadiumName: text('stadium_name').notNull(),
   stadiumCapacity: integer('stadium_capacity').notNull(),
@@ -183,6 +189,28 @@ export const career = sqliteTable('career', {
   lastPlayedAt: integer('last_played_at').notNull(),
   schemaVersion: integer('schema_version').notNull(),
 });
+
+/**
+ * Season objectives (Phase 2E.3d): one row per club per season.
+ * target_position/reward_amount/ambition are fixed at season creation;
+ * settlement columns stay NULL until the end-of-season settlement.
+ * sanction records deferred consequences only — nothing is executed
+ * while the manager-career and divisions systems do not exist.
+ */
+export const seasonObjectives = sqliteTable('season_objectives', {
+  seasonId: text('season_id').notNull(),
+  clubId: text('club_id').notNull(),
+  targetPosition: integer('target_position').notNull(),
+  rewardAmount: integer('reward_amount').notNull(),
+  ambition: text('ambition').notNull(),
+  objectiveMet: integer('objective_met'),
+  rewardPaid: integer('reward_paid').notNull().default(0),
+  debtRemaining: integer('debt_remaining'),
+  settledAt: integer('settled_at'),
+  sanction: text('sanction').notNull().default('none'),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.seasonId, table.clubId] }),
+}));
 
 export const schemaMigrations = sqliteTable('schema_migrations', {
   version: integer('version').primaryKey(),

@@ -13,6 +13,7 @@ import { simulateMatch, SeededRNG } from '../match/simulation';
 import { computeStandings } from './standings';
 import { isSeasonComplete } from './completion';
 import { processAITransferActivity } from '../transfer/market';
+import { applyWeeklyEconomy } from '../economy/weeklyEconomy';
 
 export interface MatchweekResult {
   fixtureId: string;
@@ -93,14 +94,17 @@ export function advanceMatchweek(
   const weekFixtures = league.fixtures.filter((f) => f.week === currentWeek && !f.played);
 
   if (weekFixtures.length === 0) {
-    // No fixtures to play this week, just advance the date
+    // No fixtures to play this week, but the matchweek still advances:
+    // every club receives its income and pays its wage bill (unpaid
+    // wages accumulate as debt), then the date moves forward.
+    const updatedPlayers = applyNonPlayingEffects(players);
     const updatedSeason = advanceSeasonDate(season);
     return {
       results: [],
       updatedLeague: league,
       updatedSeason,
-      updatedPlayers: applyNonPlayingEffects(players),
-      updatedClubs: clubs,
+      updatedPlayers,
+      updatedClubs: applyWeeklyEconomy(clubs, updatedPlayers),
       transferOffers: [],
       transferRecords: [],
       seasonComplete: false,
@@ -220,6 +224,12 @@ export function advanceMatchweek(
     { rng: transferRng, now: transferNow },
   );
 
+  // Weekly economy runs after AI transfer activity so payroll reflects
+  // the post-transfer squads, and before the date advance. Every club —
+  // managed and AI — receives its fixed income and pays its wage bill;
+  // unpaid wages accumulate as debt. No RNG is consumed.
+  const economyClubs = applyWeeklyEconomy(transferClubs, updatedPlayers);
+
   // Advance season
   const updatedSeason = advanceSeasonDate(season);
 
@@ -228,7 +238,7 @@ export function advanceMatchweek(
     updatedLeague,
     updatedSeason,
     updatedPlayers,
-    updatedClubs: transferClubs,
+    updatedClubs: economyClubs,
     transferOffers,
     transferRecords,
     seasonComplete: false,

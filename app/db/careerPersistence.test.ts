@@ -1353,6 +1353,59 @@ describe('Career Persistence (Real SQLite)', () => {
     });
   });
 
+  describe('club debt persistence', () => {
+    it('preserves a nonzero debt value through save/load', async () => {
+      const state = buildState();
+      const league = state.league as League;
+      league.standings.entries = state.clubs.map((c) => ({
+        clubId: c.id,
+        played: 0, won: 0, drawn: 0, lost: 0,
+        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
+      }));
+      league.fixtures = [];
+      // Distinct nonzero debts per club — they must not be confused with
+      // balance/transferBudget/wageBudget or collapsed to a default.
+      const debts = [123_456, 789_012, 345_678];
+      state.clubs.forEach((club, i) => {
+        club.finances.debt = debts[i];
+      });
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.clubs.map((c) => c.finances.debt)).toEqual(debts);
+      // Debt is independent of the other financial fields.
+      loaded!.clubs.forEach((club, i) => {
+        expect(club.finances.balance).toBe(state.clubs[i].finances.balance);
+        expect(club.finances.transferBudget).toBe(
+          state.clubs[i].finances.transferBudget,
+        );
+        expect(club.finances.wageBudget).toBe(
+          state.clubs[i].finances.wageBudget,
+        );
+        expect(club.finances.weeklyIncome).toBe(
+          state.clubs[i].finances.weeklyIncome,
+        );
+      });
+    });
+
+    it('round-trips zero debt for clubs that never accumulated any', async () => {
+      const state = buildState();
+      const league = state.league as League;
+      league.standings.entries = state.clubs.map((c) => ({
+        clubId: c.id,
+        played: 0, won: 0, drawn: 0, lost: 0,
+        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
+      }));
+      league.fixtures = [];
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.clubs.every((c) => c.finances.debt === 0)).toBe(true);
+    });
+  });
+
   describe('deterministic load ordering', () => {
     it('restores standings in engine ranking order regardless of row order', async () => {
       const state = buildState();

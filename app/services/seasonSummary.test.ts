@@ -8,7 +8,7 @@ const makeClub = (id: string, name: string): Club =>
     nickname: name,
     foundedYear: 2000,
     reputation: 50,
-    finances: { balance: 0, transferBudget: 0, wageBudget: 0, weeklyIncome: 0 },
+    finances: { balance: 0, transferBudget: 0, wageBudget: 0, weeklyIncome: 0, debt: 0 },
     squad: [],
     stadium: { name: `${name} Stadium`, capacity: 1000 },
     tactics: {

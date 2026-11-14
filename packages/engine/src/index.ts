@@ -13,6 +13,7 @@ export type { SeasonAnomalies } from './season/completion';
 export { buildNextSeason } from './season/rollover';
 export type { BuildNextSeasonInput, NextSeasonState } from './season/rollover';
 export { advanceMatchweek } from './season/advanceMatchweek';
+export { applyWeeklyEconomy } from './economy/weeklyEconomy';
 export {
   calculateMarketValue,
   updatePlayerMarketValue,

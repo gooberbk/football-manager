@@ -114,6 +114,7 @@ export async function saveCareer(state: CareerState, dbInstance: any): Promise<v
         transferBudget: club.finances.transferBudget,
         wageBudget: club.finances.wageBudget,
         weeklyIncome: club.finances.weeklyIncome,
+        debt: club.finances.debt,
         stadiumName: club.stadium.name,
         stadiumCapacity: club.stadium.capacity,
         defaultFormation: club.tactics.defaultFormation,
@@ -334,6 +335,7 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
         transferBudget: record.transferBudget,
         wageBudget: record.wageBudget,
         weeklyIncome: record.weeklyIncome,
+        debt: record.debt,
       },
       squad: [], // Will be populated from players
       stadium: {

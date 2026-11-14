@@ -462,6 +462,7 @@ function generateClub(index: number, rng: SeededRNG): Club {
       transferBudget: randomInt(baseTransferBudget - 5000000, baseTransferBudget + 10000000, rng),
       wageBudget: randomInt(baseWageBudget - 100000, baseWageBudget + 200000, rng),
       weeklyIncome: randomInt(baseWeeklyIncome - 200000, baseWeeklyIncome + 500000, rng),
+      debt: 0,
     },
     squad: [], // Will be populated after squad generation
     stadium: {

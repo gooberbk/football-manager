@@ -59,6 +59,28 @@ export function makeOffer(
     };
   }
 
+  // Validate the offer amount at the engine boundary: NaN/Infinity slip
+  // through every numeric comparison below, and zero/negative or
+  // fractional amounts are meaningless for whole-unit currency.
+  if (
+    !Number.isFinite(offerAmount) ||
+    !Number.isInteger(offerAmount) ||
+    offerAmount <= 0
+  ) {
+    return {
+      success: false,
+      error: 'Offer amount must be a positive whole number',
+    };
+  }
+
+  // A club cannot bid for its own player.
+  if (buyingClub.id === sellingClub.id) {
+    return {
+      success: false,
+      error: 'Cannot make an offer to your own club',
+    };
+  }
+
   // Check if player belongs to selling club
   if (player.contract.clubId !== sellingClub.id) {
     return {
@@ -179,6 +201,30 @@ export function executeTransfer(
   updatedPlayer: Player;
   transferRecord: TransferRecord;
 } | null {
+  // Validate the offer at the execution boundary: offers reaching this
+  // function may bypass makeOffer() (persisted data, direct engine
+  // calls), and NaN/Infinity slip through numeric comparisons. Reject
+  // before consuming any RNG values so an invalid offer leaves no trace.
+  if (
+    !Number.isFinite(offer.offerAmount) ||
+    !Number.isInteger(offer.offerAmount) ||
+    offer.offerAmount <= 0
+  ) {
+    return null;
+  }
+  if (buyingClub.id === sellingClub.id) {
+    return null;
+  }
+
+  // Re-validate the transfer budget at execution time, before any RNG
+  // consumption: offers are only checked against the budget when
+  // submitted, so several pending offers can each pass individually yet
+  // collectively exceed it. `balance` stays unchecked — no debt policy
+  // exists yet (deferred to the weekly economy phase).
+  if (offer.offerAmount > buyingClub.finances.transferBudget) {
+    return null; // Insufficient transfer budget at execution
+  }
+
   // Calculate appropriate wage for the player based on ability
   const baseWage = (player.development.currentAbility / 200) * 200000; // 0-200K base
   const wageVariance = ctx?.rng ? ctx.rng.next() : Math.random();
@@ -202,14 +248,21 @@ export function executeTransfer(
     squad: [...buyingClub.squad, player.id],
   };
 
+  // Sale proceeds repay the seller's outstanding debt first; only the
+  // remainder becomes available cash and transfer budget. The buyer's
+  // debt is never affected — paying a fee is spending, not income.
+  const debtRepayment = Math.min(sellingClub.finances.debt, offer.offerAmount);
+  const remainingProceeds = offer.offerAmount - debtRepayment;
+
   // Update selling club
   const updatedSellingClub: Club = {
     ...sellingClub,
     finances: {
       ...sellingClub.finances,
-      balance: sellingClub.finances.balance + offer.offerAmount,
-      transferBudget: sellingClub.finances.transferBudget + offer.offerAmount,
+      balance: sellingClub.finances.balance + remainingProceeds,
+      transferBudget: sellingClub.finances.transferBudget + remainingProceeds,
       wageBudget: sellingClub.finances.wageBudget + wage,
+      debt: sellingClub.finances.debt - debtRepayment,
     },
     squad: sellingClub.squad.filter((id) => id !== player.id),
   };
