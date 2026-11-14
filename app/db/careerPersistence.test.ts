@@ -322,6 +322,126 @@ describe('Career Persistence (Real SQLite)', () => {
     expect(loaded!.league.standings.entries[1].points).toBe(3);
   });
 
+  it('should preserve missing scores on played fixtures as NULL through save/load', async () => {
+    const seedData = generateSeedData(12345);
+    const clubs = seedData.clubs.slice(0, 2);
+    const players = seedData.players.filter((p) => clubs.some((c) => c.squad.includes(p.id)));
+
+    const league: League = {
+      id: 'league-1',
+      name: 'Test League',
+      tier: 1,
+      clubIds: clubs.map((c) => c.id),
+      standings: {
+        entries: clubs.map((club) => ({
+          clubId: club.id,
+          played: 0,
+          won: 0,
+          drawn: 0,
+          lost: 0,
+          goalsFor: 0,
+          goalsAgainst: 0,
+          goalDifference: 0,
+          points: 0,
+        })),
+      },
+      fixtures: [
+        // Played fixture missing homeScore (malformed — must not become 0)
+        {
+          id: 'f-missing-home',
+          homeClubId: clubs[0].id,
+          awayClubId: clubs[1].id,
+          week: 1,
+          date: new Date('2024-08-01'),
+          played: true,
+          awayScore: 2,
+        },
+        // Played fixture missing awayScore
+        {
+          id: 'f-missing-away',
+          homeClubId: clubs[1].id,
+          awayClubId: clubs[0].id,
+          week: 2,
+          date: new Date('2024-08-08'),
+          played: true,
+          homeScore: 1,
+        },
+        // Valid played fixture — scores must round-trip unchanged
+        {
+          id: 'f-valid',
+          homeClubId: clubs[0].id,
+          awayClubId: clubs[1].id,
+          week: 3,
+          date: new Date('2024-08-15'),
+          played: true,
+          homeScore: 2,
+          awayScore: 1,
+        },
+        // Unplayed fixture — scores stay undefined
+        {
+          id: 'f-unplayed',
+          homeClubId: clubs[1].id,
+          awayClubId: clubs[0].id,
+          week: 4,
+          date: new Date('2024-08-22'),
+          played: false,
+        },
+      ],
+    };
+
+    const season: Season = {
+      id: 'season-1',
+      leagueId: 'league-1',
+      currentWeek: 4,
+      currentDate: new Date('2024-08-22'),
+      transferWindowOpen: true,
+      fixturesCalendar: [],
+    };
+
+    const careerState = {
+      career: {
+        id: 'active',
+        managerName: 'Test Manager',
+        managedClubId: clubs[0].id,
+        createdAt: new Date('2024-08-01'),
+        lastPlayedAt: new Date(),
+        schemaVersion: 1,
+      },
+      clubs,
+      players,
+      league,
+      season,
+      transferHistory: [],
+      transferOffers: [],
+    };
+
+    await saveCareer(careerState, testDb);
+    const loaded = await loadCareer(testDb);
+    expect(loaded).not.toBeNull();
+
+    const byId = new Map(loaded!.league.fixtures.map((f) => [f.id, f]));
+
+    const missingHome = byId.get('f-missing-home')!;
+    expect(missingHome.played).toBe(true);
+    expect(missingHome.homeScore).toBeUndefined(); // NULL, not invented 0
+    expect(missingHome.awayScore).toBe(2);
+
+    const missingAway = byId.get('f-missing-away')!;
+    expect(missingAway.played).toBe(true);
+    expect(missingAway.homeScore).toBe(1);
+    expect(missingAway.awayScore).toBeUndefined();
+
+    const valid = byId.get('f-valid')!;
+    expect(valid.played).toBe(true);
+    expect(valid.homeScore).toBe(2);
+    expect(valid.awayScore).toBe(1);
+
+    const unplayed = byId.get('f-unplayed')!;
+    expect(unplayed.played).toBe(false);
+    expect(unplayed.homeScore).toBeUndefined();
+    expect(unplayed.awayScore).toBeUndefined();
+  });
+
   it('should persist transfer state through SQLite', async () => {
     const seedData = generateSeedData(12345);
     const clubs = seedData.clubs.slice(0, 2);
@@ -1230,6 +1350,134 @@ describe('Career Persistence (Real SQLite)', () => {
           )
         `);
       }
+    });
+  });
+
+  describe('deterministic load ordering', () => {
+    it('restores standings in engine ranking order regardless of row order', async () => {
+      const state = buildState();
+      const league = state.league as League;
+      const [clubA, clubB, clubC] = state.clubs;
+
+      // Deliberately scrambled: lowest-ranked entry first. Rows are
+      // inserted in this order, so an unordered SELECT would return it
+      // verbatim — the loader must re-sort by the canonical rule.
+      league.standings.entries = [
+        {
+          clubId: clubC.id,
+          played: 4, won: 1, drawn: 1, lost: 2,
+          goalsFor: 3, goalsAgainst: 6, goalDifference: -3, points: 4,
+        },
+        {
+          clubId: clubB.id,
+          played: 4, won: 2, drawn: 0, lost: 2,
+          goalsFor: 5, goalsAgainst: 5, goalDifference: 0, points: 6,
+        },
+        {
+          clubId: clubA.id,
+          played: 4, won: 1, drawn: 1, lost: 2,
+          goalsFor: 4, goalsAgainst: 6, goalDifference: -2, points: 4,
+        },
+      ];
+      league.clubIds = [clubA.id, clubB.id, clubC.id];
+      league.fixtures = [];
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      // points desc → goalDifference desc → goalsFor desc:
+      // B (6 pts) first, then C (-3 GD) vs A (-2 GD) → A before C.
+      expect(loaded!.league.standings.entries.map((e) => e.clubId)).toEqual([
+        clubB.id,
+        clubA.id,
+        clubC.id,
+      ]);
+    });
+
+    it('preserves league.clubIds order for fully tied standings entries', async () => {
+      const state = buildState();
+      const league = state.league as League;
+      const [clubA, clubB, clubC] = state.clubs;
+      league.clubIds = [clubA.id, clubB.id, clubC.id];
+
+      // Identical stats on every key: the engine's stable sort falls back
+      // to the order standingsMap was built in, i.e. league.clubIds order.
+      const tied = {
+        played: 4, won: 1, drawn: 1, lost: 2,
+        goalsFor: 5, goalsAgainst: 5, goalDifference: 0, points: 4,
+      };
+      // Inserted in an order that differs from clubIds order.
+      league.standings.entries = [
+        { ...tied, clubId: clubC.id },
+        { ...tied, clubId: clubA.id },
+        { ...tied, clubId: clubB.id },
+      ];
+      league.fixtures = [];
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.league.standings.entries.map((e) => e.clubId)).toEqual([
+        clubA.id,
+        clubB.id,
+        clubC.id,
+      ]);
+    });
+
+    it('restores fixtures in week/date/id order regardless of row order', async () => {
+      const state = buildState();
+      const league = state.league as League;
+      const [clubA, clubB, clubC] = state.clubs;
+      league.clubIds = [clubA.id, clubB.id, clubC.id];
+      league.standings.entries = state.clubs.map((c) => ({
+        clubId: c.id,
+        played: 0, won: 0, drawn: 0, lost: 0,
+        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
+      }));
+
+      const day = 24 * 60 * 60 * 1000;
+      const base = new Date('2024-08-01T00:00:00Z').getTime();
+      // Deliberately scrambled insertion order; ids are chosen so that
+      // neither id order nor insertion order matches the expected sort.
+      league.fixtures = [
+        {
+          id: 'fixture-9',
+          homeClubId: clubA.id, awayClubId: clubB.id,
+          week: 2, date: new Date(base + 8 * day),
+          played: false,
+        },
+        {
+          id: 'fixture-1',
+          homeClubId: clubB.id, awayClubId: clubC.id,
+          week: 1, date: new Date(base + 1 * day),
+          played: false,
+        },
+        {
+          id: 'fixture-2',
+          homeClubId: clubC.id, awayClubId: clubA.id,
+          week: 1, date: new Date(base + 1 * day),
+          played: false,
+        },
+        {
+          id: 'fixture-8',
+          homeClubId: clubA.id, awayClubId: clubC.id,
+          week: 2, date: new Date(base + 7 * day),
+          played: false,
+        },
+      ];
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      // week asc, then date asc, then id asc.
+      expect(loaded!.league.fixtures.map((f) => f.id)).toEqual([
+        'fixture-1',
+        'fixture-2',
+        'fixture-8',
+        'fixture-9',
+      ]);
+      // Date preserved exactly.
+      expect(loaded!.league.fixtures[0].date.getTime()).toBe(base + 1 * day);
     });
   });
 });

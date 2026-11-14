@@ -8,6 +8,10 @@ export { generateSeedData } from './seed/generateSeedData';
 export { simulateMatch } from './match/simulation';
 export { generateFixtures, scheduledFixturesToLeagueFixtures } from './season/scheduling';
 export { computeStandings } from './season/standings';
+export { isSeasonComplete, getSeasonAnomalies } from './season/completion';
+export type { SeasonAnomalies } from './season/completion';
+export { buildNextSeason } from './season/rollover';
+export type { BuildNextSeasonInput, NextSeasonState } from './season/rollover';
 export { advanceMatchweek } from './season/advanceMatchweek';
 export {
   calculateMarketValue,

@@ -132,6 +132,188 @@ describe('Season Scheduling', () => {
     });
   });
 
+  describe('generateFixtures — complete double round-robin coverage', () => {
+    const clubIdsFor = (n: number) =>
+      Array.from({ length: n }, (_, i) => `club-${i + 1}`);
+
+    /**
+     * Assert a full double round-robin: every unordered pair meets exactly
+     * twice (once at each venue), each club plays at most once per
+     * matchweek, no BYE/self fixtures, no duplicates, and — for odd N —
+     * exactly one bye per club per round-robin half.
+     */
+    const expectCompleteDoubleRoundRobin = (clubIds: string[]) => {
+      const n = clubIds.length;
+      const fixtures = generateFixtures(clubIds, new Date('2024-08-01'));
+
+      // Exact fixture count: N * (N - 1)
+      expect(fixtures).toHaveLength(n * (n - 1));
+
+      // No BYE leakage and no self-fixtures
+      fixtures.forEach((f) => {
+        expect(f.homeClubId).not.toBe('BYE');
+        expect(f.awayClubId).not.toBe('BYE');
+        expect(f.homeClubId).not.toBe(f.awayClubId);
+        expect(clubIds).toContain(f.homeClubId);
+        expect(clubIds).toContain(f.awayClubId);
+      });
+
+      // Every unordered pair exactly twice, once home / once away
+      const pairKey = (a: string, b: string) => [a, b].sort().join('|');
+      const pairFixtures = new Map<string, typeof fixtures>();
+      fixtures.forEach((f) => {
+        const key = pairKey(f.homeClubId, f.awayClubId);
+        const list = pairFixtures.get(key) ?? [];
+        list.push(f);
+        pairFixtures.set(key, list);
+      });
+      expect(pairFixtures.size).toBe((n * (n - 1)) / 2);
+      pairFixtures.forEach((pair, key) => {
+        expect(pair).toHaveLength(2);
+        const [a, b] = key.split('|');
+        expect(
+          pair.filter((f) => f.homeClubId === a && f.awayClubId === b),
+        ).toHaveLength(1);
+        expect(
+          pair.filter((f) => f.homeClubId === b && f.awayClubId === a),
+        ).toHaveLength(1);
+      });
+
+      // No duplicate fixtures (same pairing, same venue, same week)
+      const fixtureKeys = new Set(
+        fixtures.map((f) => `${f.homeClubId}|${f.awayClubId}|${f.matchweek}`),
+      );
+      expect(fixtureKeys.size).toBe(fixtures.length);
+
+      // Each club plays at most once per matchweek
+      const weeks = [...new Set(fixtures.map((f) => f.matchweek))];
+      weeks.forEach((week) => {
+        const weekFixtures = fixtures.filter((f) => f.matchweek === week);
+        const appearances = new Map<string, number>();
+        weekFixtures.forEach((f) => {
+          appearances.set(f.homeClubId, (appearances.get(f.homeClubId) ?? 0) + 1);
+          appearances.set(f.awayClubId, (appearances.get(f.awayClubId) ?? 0) + 1);
+        });
+        appearances.forEach((count) => expect(count).toBe(1));
+      });
+
+      // Odd N: exactly one bye per club per round-robin half.
+      // First half = weeks 1..N, second half = weeks N+1..2N.
+      if (n % 2 === 1) {
+        const halfLength = n;
+        for (let half = 0; half < 2; half++) {
+          const halfWeeks = new Set(
+            Array.from({ length: halfLength }, (_, i) => half * halfLength + i + 1),
+          );
+          clubIds.forEach((clubId) => {
+            const playedInHalf = fixtures.filter(
+              (f) =>
+                halfWeeks.has(f.matchweek) &&
+                (f.homeClubId === clubId || f.awayClubId === clubId),
+            ).length;
+            expect(playedInHalf).toBe(n - 1); // N-1 games + exactly 1 bye
+          });
+        }
+      } else {
+        // Even N: every club plays every week, zero byes.
+        const totalWeeks = 2 * (n - 1);
+        clubIds.forEach((clubId) => {
+          const played = fixtures.filter(
+            (f) => f.homeClubId === clubId || f.awayClubId === clubId,
+          ).length;
+          expect(played).toBe(totalWeeks);
+        });
+      }
+
+      // Chronological ordering: matchweeks are contiguous from 1
+      expect(Math.min(...weeks)).toBe(1);
+      expect(Math.max(...weeks)).toBe(n % 2 === 1 ? 2 * n : 2 * (n - 1));
+      expect(weeks).toHaveLength(n % 2 === 1 ? 2 * n : 2 * (n - 1));
+    };
+
+    it.each([3, 5, 7, 11])(
+      'generates a complete double round-robin for %i clubs (odd)',
+      (n) => {
+        expectCompleteDoubleRoundRobin(clubIdsFor(n));
+      },
+    );
+
+    it.each([2, 4, 10, 16])(
+      'generates a complete double round-robin for %i clubs (even)',
+      (n) => {
+        expectCompleteDoubleRoundRobin(clubIdsFor(n));
+      },
+    );
+
+    it.each([3, 5, 7, 11, 16, 20])(
+      'keeps matchweek dates exactly 7 days apart for %i clubs',
+      (n) => {
+        const startDate = new Date('2024-08-01');
+        const fixtures = generateFixtures(clubIdsFor(n), startDate);
+
+        // One date per matchweek (all fixtures of a week share it)
+        const dateByWeek = new Map<number, Date>();
+        fixtures.forEach((f) => {
+          const existing = dateByWeek.get(f.matchweek);
+          if (existing) {
+            expect(f.date).toEqual(existing);
+          } else {
+            dateByWeek.set(f.matchweek, f.date);
+          }
+        });
+
+        const weeks = [...dateByWeek.keys()].sort((a, b) => a - b);
+
+        // Matchweek 1 falls on the season start date
+        expect(weeks[0]).toBe(1);
+        expect(dateByWeek.get(1)).toEqual(startDate);
+
+        // Matchweeks are contiguous and exactly 7 days apart — including
+        // across the first/second half boundary (no calendar gap)
+        const weekMs = 7 * 24 * 60 * 60 * 1000;
+        for (let i = 1; i < weeks.length; i++) {
+          expect(weeks[i]).toBe(weeks[i - 1] + 1);
+          expect(
+            dateByWeek.get(weeks[i])!.getTime() -
+              dateByWeek.get(weeks[i - 1])!.getTime(),
+          ).toBe(weekMs);
+        }
+      },
+    );
+
+    it('assigns one bye per club per half for 3 clubs', () => {
+      const clubIds = ['club-1', 'club-2', 'club-3'];
+      const fixtures = generateFixtures(clubIds, new Date('2024-08-01'));
+      // 6 matchweeks: weeks 1-3 first half, 4-6 second half
+      const byes = new Map<string, number[]>(
+        clubIds.map((id) => [id, []]),
+      );
+      for (let week = 1; week <= 6; week++) {
+        const playing = new Set<string>();
+        fixtures
+          .filter((f) => f.matchweek === week)
+          .forEach((f) => {
+            playing.add(f.homeClubId);
+            playing.add(f.awayClubId);
+          });
+        clubIds.forEach((clubId) => {
+          if (!playing.has(clubId)) {
+            byes.get(clubId)!.push(week);
+          }
+        });
+      }
+      // All three clubs recorded, each with exactly two byes —
+      // one per half
+      expect(byes.size).toBe(3);
+      clubIds.forEach((clubId) => {
+        const weeks = byes.get(clubId)!;
+        expect(weeks).toHaveLength(2);
+        expect(weeks.filter((w) => w <= 3)).toHaveLength(1);
+        expect(weeks.filter((w) => w > 3)).toHaveLength(1);
+      });
+    });
+  });
+
   describe('scheduledFixturesToLeagueFixtures', () => {
     it('should convert scheduled fixtures to league fixtures format', () => {
       const scheduledFixtures = [

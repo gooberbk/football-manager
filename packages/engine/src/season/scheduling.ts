@@ -29,12 +29,11 @@ export function generateFixtures(
   const workingClubs = isOdd ? [...clubIds, 'BYE'] : [...clubIds];
   const numWorkingClubs = workingClubs.length;
 
-  // Circle method for round-robin scheduling
-  const totalMatchweeks = 2 * (numClubs - 1);
-
-  // First half of season
+  // First half of season. The circle method needs numWorkingClubs - 1
+  // rounds: for odd club counts the BYE dummy makes the working set even,
+  // so it requires one more round than the club count alone would suggest.
   let roundClubs = [...workingClubs];
-  for (let round = 0; round < numClubs - 1; round++) {
+  for (let round = 0; round < numWorkingClubs - 1; round++) {
     const matchweek = round + 1;
     const weekDate = new Date(seasonStartDate);
     weekDate.setDate(weekDate.getDate() + round * 7);
@@ -63,12 +62,16 @@ export function generateFixtures(
     roundClubs[1] = lastClub;
   }
 
-  // Second half of season (swap home/away)
+  // Second half of season (swap home/away). It starts after the first
+  // half's last matchweek: numWorkingClubs rounds were played, so the
+  // offset is numWorkingClubs (identical to numClubs for even counts).
   roundClubs = [...workingClubs];
-  for (let round = 0; round < numClubs - 1; round++) {
-    const matchweek = numClubs + round;
+  for (let round = 0; round < numWorkingClubs - 1; round++) {
+    const matchweek = numWorkingClubs + round;
     const weekDate = new Date(seasonStartDate);
-    weekDate.setDate(weekDate.getDate() + matchweek * 7);
+    // Matchweeks are 1-based: week N is seasonStart + (N - 1) * 7 days,
+    // the same convention as the first half (round * 7 = (matchweek-1) * 7).
+    weekDate.setDate(weekDate.getDate() + (matchweek - 1) * 7);
 
     for (let i = 0; i < numWorkingClubs / 2; i++) {
       const homeClubId = roundClubs[i];

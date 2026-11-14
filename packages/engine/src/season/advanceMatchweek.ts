@@ -11,6 +11,7 @@ import {
 } from '@club-director/shared-types';
 import { simulateMatch, SeededRNG } from '../match/simulation';
 import { computeStandings } from './standings';
+import { isSeasonComplete } from './completion';
 import { processAITransferActivity } from '../transfer/market';
 
 export interface MatchweekResult {
@@ -30,6 +31,14 @@ export interface MatchweekAdvancement {
   updatedClubs: Club[];
   transferOffers: TransferOffer[];
   transferRecords: TransferRecord[];
+  /**
+   * `true` when the advancement was refused because the season is
+   * already complete: no matchweek was simulated, `currentWeek` and
+   * `currentDate` are unchanged, no effects or transfers were
+   * generated, and every `updated*` field aliases its input unchanged.
+   * `false` on every normal advancement.
+   */
+  seasonComplete: boolean;
 }
 
 export interface AdvanceMatchweekOptions {
@@ -64,6 +73,22 @@ export function advanceMatchweek(
   players: Player[],
   options?: AdvanceMatchweekOptions,
 ): MatchweekAdvancement {
+  // A completed season must never advance: refuse before touching
+  // anything and return the inputs unchanged so callers can detect the
+  // refusal via `seasonComplete` without risking partial state.
+  if (isSeasonComplete(league, season)) {
+    return {
+      results: [],
+      updatedLeague: league,
+      updatedSeason: season,
+      updatedPlayers: players,
+      updatedClubs: clubs,
+      transferOffers: [],
+      transferRecords: [],
+      seasonComplete: true,
+    };
+  }
+
   const currentWeek = season.currentWeek;
   const weekFixtures = league.fixtures.filter((f) => f.week === currentWeek && !f.played);
 
@@ -78,6 +103,7 @@ export function advanceMatchweek(
       updatedClubs: clubs,
       transferOffers: [],
       transferRecords: [],
+      seasonComplete: false,
     };
   }
 
@@ -205,6 +231,7 @@ export function advanceMatchweek(
     updatedClubs: transferClubs,
     transferOffers,
     transferRecords,
+    seasonComplete: false,
   };
 }
 

@@ -1,5 +1,5 @@
 import * as schema from './schema';
-import { eq } from 'drizzle-orm';
+import { eq, asc } from 'drizzle-orm';
 import {
   compareMatchEventRows,
   matchFromDbRows,
@@ -215,8 +215,11 @@ export async function saveCareer(state: CareerState, dbInstance: any): Promise<v
         week: fixture.week,
         date: fixture.date.getTime(),
         played: fixture.played ? 1 : 0,
-        homeScore: fixture.played ? (fixture.homeScore ?? 0) : null,
-        awayScore: fixture.played ? (fixture.awayScore ?? 0) : null,
+        // Never invent scores: a played fixture with a missing score is
+        // malformed data and must persist as NULL (loadCareer maps NULL
+        // back to undefined), not silently become a 0-0 result.
+        homeScore: fixture.played ? (fixture.homeScore ?? null) : null,
+        awayScore: fixture.played ? (fixture.awayScore ?? null) : null,
       }).run();
     }
 
@@ -439,23 +442,50 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
       fixtures: [],
     };
 
-    // Load league standings
+    // Load league standings. SQLite does not guarantee row order, so the
+    // entries are re-sorted in memory with the engine's canonical rule —
+    // points, then goal difference, then goals scored, all descending —
+    // and the final tie-break reproduces computeStandings' stable sort:
+    // entries tied on every key keep their league.clubIds order (the
+    // order standingsMap was built in).
     const standingsRecords = await dbInstance.select().from(schema.leagueStandings);
-    const standingsEntries: StandingEntry[] = standingsRecords.map((record: any) => ({
-      clubId: record.clubId,
-      played: record.played,
-      won: record.won,
-      drawn: record.drawn,
-      lost: record.lost,
-      goalsFor: record.goalsFor,
-      goalsAgainst: record.goalsAgainst,
-      goalDifference: record.goalDifference,
-      points: record.points,
-    }));
+    const clubOrder = new Map(
+      (JSON.parse(leagueRecord.clubIds) as string[]).map((id, i) => [id, i]),
+    );
+    const standingsEntries: StandingEntry[] = standingsRecords
+      .map((record: any): StandingEntry => ({
+        clubId: record.clubId,
+        played: record.played,
+        won: record.won,
+        drawn: record.drawn,
+        lost: record.lost,
+        goalsFor: record.goalsFor,
+        goalsAgainst: record.goalsAgainst,
+        goalDifference: record.goalDifference,
+        points: record.points,
+      }))
+      .sort((a: StandingEntry, b: StandingEntry) => {
+        if (b.points !== a.points) return b.points - a.points;
+        if (b.goalDifference !== a.goalDifference) {
+          return b.goalDifference - a.goalDifference;
+        }
+        if (b.goalsFor !== a.goalsFor) return b.goalsFor - a.goalsFor;
+        const orderA = clubOrder.get(a.clubId) ?? Number.MAX_SAFE_INTEGER;
+        const orderB = clubOrder.get(b.clubId) ?? Number.MAX_SAFE_INTEGER;
+        return orderA - orderB;
+      });
     league.standings.entries = standingsEntries;
 
-    // Load fixtures
-    const fixtureRecords = await dbInstance.select().from(schema.fixtures);
+    // Load fixtures in deterministic matchweek/date/id order — SQLite
+    // row order is unspecified and must not leak into the domain model.
+    const fixtureRecords = await dbInstance
+      .select()
+      .from(schema.fixtures)
+      .orderBy(
+        asc(schema.fixtures.week),
+        asc(schema.fixtures.date),
+        asc(schema.fixtures.id),
+      );
     const fixtures: Fixture[] = fixtureRecords.map((record: any) => ({
       id: record.id,
       leagueId: record.leagueId,
