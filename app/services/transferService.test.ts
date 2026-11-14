@@ -335,6 +335,62 @@ describe('transferService.resolvePendingOffer', () => {
     // With no offers returned, the caller's pending offer remains pending.
     expect(result.offers).toBeUndefined();
   });
+
+  it('uses one consistent date for resolution, record, contract and valuation', () => {
+    jest.useFakeTimers();
+    const randomSpy = jest.spyOn(Math, 'random');
+    try {
+      const FIXED = new Date('2025-03-10T12:00:00Z');
+      jest.setSystemTime(FIXED);
+      randomSpy.mockReturnValue(0.5);
+
+      const { clubs, players, offer } = acceptedScenario();
+      const player = players.find((p) => p.id === offer.playerId)!;
+
+      const result = resolvePendingOffer({
+        offerId: offer.id,
+        offers: [offer],
+        clubs,
+        players,
+        transferHistory: [],
+      });
+
+      expect(result.success).toBe(true);
+      const fixedTime = FIXED.getTime();
+
+      // resolvedAt and the transfer record share the captured date.
+      expect(result.offers![0].resolvedAt!.getTime()).toBe(fixedTime);
+      expect(result.transferHistory![0].date.getTime()).toBe(fixedTime);
+
+      const updatedPlayer = result.players!.find((p) => p.id === player.id)!;
+
+      // Contract expiry follows market.ts exactly: contractYears =
+      // 3 + floor(Math.random() * 3) = 3 + floor(0.5 * 3) = 4 years, added
+      // to the captured date via setFullYear — proving executeTransfer
+      // used the same `now` instead of a fresh real-world date.
+      const expectedExpiry = new Date(FIXED);
+      expectedExpiry.setFullYear(expectedExpiry.getFullYear() + 4);
+      const expiry = updatedPlayer.contract.contractExpiryDate;
+      expect(expiry.getTime()).toBe(expectedExpiry.getTime());
+
+      // Post-transfer market value was computed at the same date on the
+      // pre-transfer player state.
+      expect(updatedPlayer.contract.marketValue).toBe(
+        calculateMarketValue(player, FIXED),
+      );
+
+      // Wage variance still comes from Math.random (unseeded interactive
+      // path): with the spy pinned at 0.5 the wage is exactly
+      // baseWage + 0.5 * 50000.
+      const expectedWage = Math.round(
+        (player.development.currentAbility / 200) * 200000 + 0.5 * 50000,
+      );
+      expect(updatedPlayer.contract.wage).toBe(expectedWage);
+    } finally {
+      randomSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('transferService.withdrawPendingOffer', () => {

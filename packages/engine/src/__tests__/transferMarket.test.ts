@@ -9,6 +9,7 @@ import {
   processAITransferActivity,
 } from '../transfer/market';
 import { generateSeedData } from '../seed/generateSeedData';
+import { SeededRNG } from '../match/simulation';
 import {
   Club,
   Player,
@@ -478,6 +479,87 @@ describe('Transfer Market', () => {
       expect(poorResolution).toBe('accepted');
       // Rich club should reject
       expect(richResolution).toBe('rejected');
+    });
+  });
+
+  describe('Deterministic Valuation', () => {
+    const FIXED_NOW = new Date('2025-01-15T00:00:00Z');
+
+    it('produces identical market values for identical player and explicit date', () => {
+      const seedData = generateSeedData(12345);
+      const player = seedData.players[0];
+
+      const first = calculateMarketValue(player, FIXED_NOW);
+      const second = calculateMarketValue(player, FIXED_NOW);
+
+      expect(first).toBe(second);
+      expect(first).toBeGreaterThan(0);
+    });
+
+    it('produces different values for different explicit dates when contract duration changes', () => {
+      const seedData = generateSeedData(12345);
+      const basePlayer = seedData.players[0];
+
+      // Contract expires 2025-06-01: ~4.5 months remain at FIXED_NOW
+      // (50% penalty) vs ~12 months at 2024-06-01 (no penalty).
+      const player: Player = {
+        ...basePlayer,
+        contract: {
+          ...basePlayer.contract,
+          contractExpiryDate: new Date('2025-06-01T00:00:00Z'),
+        },
+      };
+
+      const nearExpiry = calculateMarketValue(player, FIXED_NOW);
+      const distantExpiry = calculateMarketValue(
+        player,
+        new Date('2024-06-01T00:00:00Z'),
+      );
+
+      expect(nearExpiry).toBeLessThan(distantExpiry);
+    });
+
+    it('replays identical seeded AI transfer activity with an injected date', () => {
+      const run = () => {
+        const seedData = generateSeedData(12345);
+        const clubs = seedData.clubs.slice(0, 8);
+        const players = seedData.players;
+        const history: TransferRecord[] = [];
+        const offers = processAITransferActivity(
+          clubs,
+          players,
+          [],
+          true,
+          [],
+          history,
+          { rng: new SeededRNG(4242), now: FIXED_NOW },
+        );
+        return { offers, history, clubs, players };
+      };
+
+      const a = run();
+      const b = run();
+
+      expect(a.offers).toEqual(b.offers);
+      expect(a.history).toEqual(b.history);
+      // Club finances and squads must be identical too — valuation feeds
+      // offer amounts and execution.
+      expect(
+        a.clubs.map((c) => ({
+          id: c.id,
+          finances: c.finances,
+          squad: [...c.squad].sort(),
+        })),
+      ).toEqual(
+        b.clubs.map((c) => ({
+          id: c.id,
+          finances: c.finances,
+          squad: [...c.squad].sort(),
+        })),
+      );
+      expect(
+        a.players.map((p) => ({ id: p.id, contract: p.contract })),
+      ).toEqual(b.players.map((p) => ({ id: p.id, contract: p.contract })));
     });
   });
 });

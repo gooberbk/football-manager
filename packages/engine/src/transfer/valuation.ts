@@ -5,7 +5,7 @@ import { Player, Club } from '@club-director/shared-types';
  * Value peaks in mid-20s, declines after ~30, and is affected by ability,
  * potential, contract length, and recent form.
  */
-export function calculateMarketValue(player: Player): number {
+export function calculateMarketValue(player: Player, now: Date = new Date()): number {
   const { development, status, contract, age } = player;
 
   // Base value from current ability (scaled to millions)
@@ -29,8 +29,10 @@ export function calculateMarketValue(player: Player): number {
   }
   baseValue *= ageMultiplier;
 
-  // Contract length penalty (expiring soon = lower value)
-  const now = new Date();
+  // Contract length penalty (expiring soon = lower value). The reference
+  // date is explicit so deterministic callers (matchweek/AI transfers)
+  // can pin it via TransferRandomContext.now; interactive callers keep
+  // the real current time by default.
   const contractMonthsRemaining = Math.max(
     0,
     (contract.contractExpiryDate.getTime() - now.getTime()) / (30 * 24 * 60 * 60 * 1000),
@@ -68,8 +70,8 @@ export function calculateMarketValue(player: Player): number {
 /**
  * Update a player's market value (to be called periodically).
  */
-export function updatePlayerMarketValue(player: Player): Player {
-  const newValue = calculateMarketValue(player);
+export function updatePlayerMarketValue(player: Player, now?: Date): Player {
+  const newValue = calculateMarketValue(player, now);
   return {
     ...player,
     contract: {

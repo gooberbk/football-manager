@@ -75,8 +75,9 @@ export function makeOffer(
     };
   }
 
-  // Check minimum offer threshold (70% of market value)
-  const marketValue = calculateMarketValue(player);
+  // Check minimum offer threshold (70% of market value). The valuation
+  // reference date comes from the deterministic context when present.
+  const marketValue = calculateMarketValue(player, ctx?.now);
   const minOffer = marketValue * 0.7;
   if (offerAmount < minOffer) {
     return {
@@ -225,7 +226,7 @@ export function executeTransfer(
       clubId: buyingClub.id,
       wage,
       contractExpiryDate,
-      marketValue: calculateMarketValue(player), // Recalculate after transfer
+      marketValue: calculateMarketValue(player, ctx?.now), // Recalculate after transfer
     },
   };
 
@@ -329,6 +330,7 @@ export function processAITransferActivity(
       clubs,
       players,
       buyingClub.finances.transferBudget,
+      ctx?.now,
     );
 
     if (!targetPlayer) {
@@ -351,8 +353,9 @@ export function processAITransferActivity(
       continue;
     }
 
-    // Make offer at market value
-    const marketValue = calculateMarketValue(targetPlayer);
+    // Make offer at market value — valued at the deterministic
+    // simulation date so AI decisions replay identically.
+    const marketValue = calculateMarketValue(targetPlayer, ctx?.now);
     const offerAmount = marketValue;
 
     const result = makeOffer(
@@ -477,12 +480,13 @@ function findSuitablePlayer(
   clubs: Club[],
   players: Player[],
   budget: number,
+  now?: Date,
 ): Player | null {
   const availablePlayers = players.filter(
     (p) =>
       p.primaryPosition === targetPosition &&
       p.contract.clubId !== buyingClub.id &&
-      calculateMarketValue(p) <= budget,
+      calculateMarketValue(p, now) <= budget,
   );
 
   if (availablePlayers.length === 0) {

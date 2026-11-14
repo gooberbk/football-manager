@@ -117,12 +117,16 @@ export function resolvePendingOffer(params: ResolveOfferParams): TransferActionR
     return { success: false, error: 'Offer references missing club or player' };
   }
 
+  // Single real-time reference for this interactive resolution: market
+  // valuation and resolution timestamps share it.
+  const now = new Date();
+
   // Guard against stale offers: the player must still be at the selling club.
   if (player.contract.clubId !== offer.sellingClubId) {
     const resolvedOffer: TransferOffer = {
       ...offer,
       status: 'rejected',
-      resolvedAt: new Date(),
+      resolvedAt: now,
     };
     return {
       success: false,
@@ -131,12 +135,12 @@ export function resolvePendingOffer(params: ResolveOfferParams): TransferActionR
     };
   }
 
-  const marketValue = calculateMarketValue(player);
+  const marketValue = calculateMarketValue(player, now);
   const status = resolveOffer(offer, sellingClub, marketValue);
   const resolvedOffer: TransferOffer = {
     ...offer,
     status,
-    resolvedAt: new Date(),
+    resolvedAt: now,
   };
   const updatedOffers = offers.map((o) => (o.id === offerId ? resolvedOffer : o));
 
@@ -151,6 +155,11 @@ export function resolvePendingOffer(params: ResolveOfferParams): TransferActionR
     player,
     players,
     transferHistory,
+    // Pin the same date captured above so valuation, resolution
+    // timestamp, post-transfer market value, contract expiry and the
+    // transfer record all share one reference instant. `rng` stays
+    // undefined: interactive wage variance keeps using Math.random().
+    { now },
   );
 
   if (!execution) {
