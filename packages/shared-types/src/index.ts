@@ -85,7 +85,12 @@ export interface Injury {
 export type InjurySeverity = 'minor' | 'moderate' | 'serious' | 'severe';
 
 export interface PlayerContract {
-  clubId: string;
+  /**
+   * Employing club id, or `null` for a free agent. A player is under
+   * contract iff `clubId !== null`, which implies membership in that
+   * club's `squad`; a free agent belongs to no `Club.squad`.
+   */
+  clubId: string | null;
   wage: number;
   contractExpiryDate: Date;
   marketValue: number;

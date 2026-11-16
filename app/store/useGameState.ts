@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { League, Season, Club, Player, TransferOffer, TransferRecord } from '@club-director/shared-types';
+import type { League, Season, Club, Player, SeasonObjective, TransferOffer, TransferRecord } from '@club-director/shared-types';
 import type { PersistedMatch } from '../db/matchRecords';
 import { saveCareer } from '../db';
 
@@ -12,6 +12,7 @@ interface GameState {
   transferOffers: TransferOffer[];
   transferHistory: TransferRecord[];
   matches: PersistedMatch[];
+  seasonObjectives: SeasonObjective[];
   managedClubId: string | null;
   isLoading: boolean;
   /**
@@ -31,6 +32,7 @@ interface GameState {
   setManagedClubId: (id: string) => void;
   setIsLoading: (loading: boolean) => void;
   setTransferOffers: (offers: TransferOffer[]) => void;
+  setSeasonObjectives: (objectives: SeasonObjective[]) => void;
   setResultsHistory: (results: string[]) => void;
   addResult: (result: string) => void;
   reset: () => void;
@@ -46,6 +48,7 @@ export const useGameState = create<GameState>((set, get) => ({
   transferOffers: [],
   transferHistory: [],
   matches: [],
+  seasonObjectives: [],
   managedClubId: null,
   isLoading: true,
   bootStatus: 'pending',
@@ -59,6 +62,7 @@ export const useGameState = create<GameState>((set, get) => ({
   setManagedClubId: (id) => set({ managedClubId: id }),
   setIsLoading: (loading) => set({ isLoading: loading }),
   setTransferOffers: (offers) => set({ transferOffers: offers }),
+  setSeasonObjectives: (objectives) => set({ seasonObjectives: objectives }),
   setResultsHistory: (results) => set({ resultsHistory: results }),
   addResult: (result) => set((state) => ({ resultsHistory: [...state.resultsHistory, result] })),
   reset: () => set({
@@ -70,11 +74,12 @@ export const useGameState = create<GameState>((set, get) => ({
     transferOffers: [],
     transferHistory: [],
     matches: [],
+    seasonObjectives: [],
     managedClubId: null,
     isLoading: true,
   }),
   saveState: async () => {
-    const { league, season, clubs, players, transferHistory, transferOffers, matches, managedClubId, isLoading } = get();
+    const { league, season, clubs, players, transferHistory, transferOffers, matches, seasonObjectives, managedClubId, isLoading } = get();
     if (league && season && clubs.length > 0 && players.length > 0 && managedClubId && !isLoading) {
       try {
         const careerState = {
@@ -93,6 +98,7 @@ export const useGameState = create<GameState>((set, get) => ({
           transferHistory,
           transferOffers,
           matches,
+          seasonObjectives,
         };
         await saveCareer(careerState);
       } catch (error) {

@@ -31,6 +31,7 @@ export function resetTestDatabase() {
     sqliteInstance.exec('DROP TABLE IF EXISTS match_events');
     sqliteInstance.exec('DROP TABLE IF EXISTS transfers');
     sqliteInstance.exec('DROP TABLE IF EXISTS transfer_offers');
+    sqliteInstance.exec('DROP TABLE IF EXISTS season_objectives');
     sqliteInstance.exec('DROP TABLE IF EXISTS schema_migrations');
     sqliteInstance.exec('DROP TABLE IF EXISTS career');
     sqliteInstance.exec('DROP TRIGGER IF EXISTS fail_delete_test');

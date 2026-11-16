@@ -419,11 +419,98 @@ describe('buildNextSeason', () => {
     });
   });
 
-  it('returns clubs and players as the same untouched references', () => {
+  it('returns clubs as the same reference and ages every player by one year', () => {
     const input = baseInput(4);
     const next = buildNextSeason(input);
     expect(next.clubs).toBe(input.clubs);
-    expect(next.players).toBe(input.players);
+    // Players are intentionally transformed: new array, new objects,
+    // age + 1 — everything else preserved.
+    expect(next.players).not.toBe(input.players);
+    expect(next.players).toHaveLength(input.players.length);
+    next.players.forEach((player, index) => {
+      const source = input.players[index];
+      expect(player.id).toBe(source.id);
+      expect(player.age).toBe(source.age + 1);
+      expect(player).not.toBe(source);
+      expect(player.attributes).toBe(source.attributes);
+      expect(player.development).toBe(source.development);
+      expect(player.status).toBe(source.status);
+      expect(player.contract).toBe(source.contract);
+    });
+  });
+
+  it('ages players exactly once per rollover, +2 across two chained rollovers', () => {
+    const first = baseInput(4);
+    const second = buildNextSeason(first);
+
+    // Chain a second rollover on the produced state: the season must be
+    // complete again, so rebuild inputs from the first output.
+    const chainedInput = {
+      league: {
+        ...second.league,
+        fixtures: second.league.fixtures.map((f) => ({
+          ...f,
+          played: true,
+          homeScore: 0,
+          awayScore: 0,
+        })),
+      },
+      season: { ...second.season, currentWeek: 30 },
+      clubs: second.clubs,
+      players: second.players,
+      newSeasonId: 'season-3',
+      // Must be >= the last fixture date of the second season's
+      // calendar (generated from 2025-08-01).
+      newStartDate: new Date('2026-06-01'),
+    };
+    const third = buildNextSeason(chainedInput);
+
+    third.players.forEach((player, index) => {
+      expect(player.age).toBe(first.players[index].age + 2);
+      expect(player.id).toBe(first.players[index].id);
+    });
+  });
+
+  it('ages every player in the collection regardless of club affiliation', () => {
+    const input = baseInput(4);
+    // Simulate a player who changed clubs during the season: contract
+    // points at a different club than the squad they belong to is not
+    // required — aging applies to the players collection regardless of
+    // club affiliation. Give one player a distinct marker to identify.
+    const marker = { ...input.players[0], id: 'player-transferred' };
+    input.players[0] = marker;
+    const next = buildNextSeason(input);
+    const aged = next.players.find((p) => p.id === 'player-transferred')!;
+    expect(aged.age).toBe(marker.age + 1);
+    expect(aged.contract).toBe(marker.contract);
+  });
+
+  it('aging is independent of player order and preserves collection integrity', () => {
+    const input = baseInput(6);
+    const reversed = {
+      ...input,
+      players: [...input.players].reverse(),
+    };
+    const nextA = buildNextSeason(input);
+    const nextB = buildNextSeason(reversed);
+
+    const byIdA = new Map(nextA.players.map((p) => [p.id, p]));
+    for (const player of nextB.players) {
+      const counterpart = byIdA.get(player.id)!;
+      expect(player.age).toBe(counterpart.age);
+      expect(player.attributes).toBe(counterpart.attributes);
+      expect(player.development).toBe(counterpart.development);
+    }
+    // Same set of ids, no loss, no duplication.
+    expect(new Set(nextA.players.map((p) => p.id)).size).toBe(
+      nextA.players.length,
+    );
+    // Squad references still resolve to the same player ids.
+    nextA.clubs.forEach((club) => {
+      club.squad.forEach((id) => {
+        expect(nextA.players.some((p) => p.id === id)).toBe(true);
+      });
+    });
   });
 
   it('does not mutate inputs', () => {
@@ -443,5 +530,23 @@ describe('buildNextSeason', () => {
     const b = buildNextSeason(baseInput(5));
     expect(a.league.fixtures).toEqual(b.league.fixtures);
     expect(a.season).toEqual(b.season);
+  });
+
+  it('ages by exactly +1 on every call with identical inputs — never accumulates', () => {
+    const input = baseInput(4);
+    const snapshot = JSON.stringify(input.players);
+
+    const first = buildNextSeason(input);
+    const second = buildNextSeason(input);
+
+    // Same inputs → same aged output, not +2: each call ages the
+    // ORIGINAL players once. (Distinct from chained rollovers, where
+    // the first output feeds the second input and yields +2.)
+    expect(second.players).toEqual(first.players);
+    first.players.forEach((player, index) => {
+      expect(player.age).toBe(input.players[index].age + 1);
+      expect(player.age).not.toBe(input.players[index].age + 2);
+    });
+    expect(JSON.stringify(input.players)).toBe(snapshot);
   });
 });

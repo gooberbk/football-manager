@@ -12,9 +12,10 @@ export interface BuildNextSeasonInput {
   league: League;
   season: Season;
   /**
-   * Clubs and players are carried over unchanged. They are part of the
-   * input contract (callers pass the full career state) and are returned
-   * by reference — the engine never mutates them.
+   * Clubs are carried over unchanged and returned by reference. Players
+   * are part of the input contract (callers pass the full career state)
+   * but are NOT returned as-is: every player ages exactly one year as
+   * part of the new-season construction (see NextSeasonState.players).
    */
   clubs: Club[];
   players: Player[];
@@ -28,6 +29,12 @@ export interface NextSeasonState {
   league: League;
   season: Season;
   clubs: Club[];
+  /**
+   * Every input player with `age + 1` — the annual aging applied once
+   * per successful season rollover. New objects; all other fields
+   * (attributes, development, status, contract) are preserved by
+   * reference/value. Input players are never mutated.
+   */
   players: Player[];
 }
 
@@ -52,7 +59,12 @@ export interface NextSeasonState {
  * - league: same id/name/tier/clubIds; fixtures regenerated via the
  *   existing double round-robin scheduler; standings reset to zero for
  *   every club.
- * - clubs/players: returned as the same references, untouched.
+ * - clubs: returned as the same reference, untouched.
+ * - players: every player ages exactly one year (`age + 1`). This is the
+ *   single annual aging point of the career lifecycle — callers must
+ *   publish `next.players` (never the input array) so memory and
+ *   persistence stay consistent. All other player fields are preserved;
+ *   inputs are never mutated.
  */
 export function buildNextSeason(input: BuildNextSeasonInput): NextSeasonState {
   const { league, season, clubs, players, newSeasonId, newStartDate } = input;
@@ -192,10 +204,20 @@ export function buildNextSeason(input: BuildNextSeasonInput): NextSeasonState {
     fixturesCalendar: [],
   };
 
+  // Annual aging: exactly +1 year for every player, applied once per
+  // rollover construction. Deterministic (no RNG), order-preserving and
+  // non-mutating — a retried rollover recomputes the same result from
+  // the same un-aged inputs, so aging can never be applied twice to the
+  // same source state.
+  const agedPlayers = players.map((player) => ({
+    ...player,
+    age: player.age + 1,
+  }));
+
   return {
     league: newLeague,
     season: newSeason,
     clubs,
-    players,
+    players: agedPlayers,
   };
 }

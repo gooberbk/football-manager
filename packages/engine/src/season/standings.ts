@@ -1,6 +1,26 @@
 import { Fixture, League, LeagueStandings, StandingEntry } from '@club-director/shared-types';
 
 /**
+ * Canonical standings comparison: points, then goal difference, then
+ * goals scored — all descending. This is the ONLY ranking comparator in
+ * the engine; computeStandings relies on Array.sort stability to resolve
+ * full ties in league.clubIds insertion order, so callers needing a
+ * total order must apply that same clubIds tiebreak explicitly.
+ */
+export function compareStandingEntries(
+  a: StandingEntry,
+  b: StandingEntry,
+): number {
+  if (b.points !== a.points) {
+    return b.points - a.points;
+  }
+  if (b.goalDifference !== a.goalDifference) {
+    return b.goalDifference - a.goalDifference;
+  }
+  return b.goalsFor - a.goalsFor;
+}
+
+/**
  * Compute league standings from fixtures and results.
  * Sorted by points, then goal difference, then goals scored.
  */
@@ -66,19 +86,9 @@ export function computeStandings(league: League): LeagueStandings {
     }
   });
 
-  // Convert to array and sort
-  const entries = Array.from(standingsMap.values()).sort((a, b) => {
-    // Primary: points
-    if (b.points !== a.points) {
-      return b.points - a.points;
-    }
-    // Secondary: goal difference
-    if (b.goalDifference !== a.goalDifference) {
-      return b.goalDifference - a.goalDifference;
-    }
-    // Tertiary: goals scored
-    return b.goalsFor - a.goalsFor;
-  });
+  // Convert to array and sort — stable sort keeps league.clubIds order
+  // for entries tied on every comparison key.
+  const entries = Array.from(standingsMap.values()).sort(compareStandingEntries);
 
   return { entries };
 }

@@ -57,8 +57,9 @@ export const players = sqliteTable('players', {
   injuryType: text('injury_type'),
   injuryDaysRemaining: integer('injury_days_remaining'),
   injurySeverity: text('injury_severity'),
-  // Contract
-  clubId: text('club_id').notNull(),
+  // Contract — nullable since migration v6: NULL marks a free agent
+  // (contract.clubId === null), who belongs to no club squad.
+  clubId: text('club_id'),
   wage: integer('wage').notNull(),
   contractExpiryDate: integer('contract_expiry_date').notNull(),
   marketValue: integer('market_value').notNull(),

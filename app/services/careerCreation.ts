@@ -1,4 +1,4 @@
-import { generateSeedData, generateFixtures, scheduledFixturesToLeagueFixtures } from '@club-director/engine';
+import { assignSeasonObjectives, generateSeedData, generateFixtures, scheduledFixturesToLeagueFixtures } from '@club-director/engine';
 import { saveCareer, initializeDatabase } from '../db';
 import type { League, Season } from '@club-director/shared-types';
 import { useGameState } from '../store/useGameState';
@@ -57,6 +57,21 @@ export async function createCareer(clubIndex: number): Promise<void> {
   const scheduledFixtures = generateFixtures(clubs.map((c) => c.id), new Date('2024-08-01'));
   league.fixtures = scheduledFixturesToLeagueFixtures(scheduledFixtures);
 
+  // Season objectives are assigned at season start, before the career is
+  // persisted — the same transaction then carries them atomically. The
+  // generator is pure/deterministic and throws on invalid data, which
+  // aborts creation before saveCareer (no partial career).
+  const seasonWeeks = league.fixtures.reduce(
+    (max, fixture) => Math.max(max, fixture.week),
+    0,
+  );
+  const seasonObjectives = assignSeasonObjectives({
+    seasonId: season.id,
+    clubs,
+    players,
+    seasonWeeks,
+  });
+
   const careerState = {
     career: {
       id: 'active',
@@ -73,6 +88,7 @@ export async function createCareer(clubIndex: number): Promise<void> {
     transferHistory: [],
     transferOffers: [],
     matches: [],
+    seasonObjectives,
   };
 
   await saveCareer(careerState);
@@ -87,6 +103,7 @@ export async function createCareer(clubIndex: number): Promise<void> {
   store.setTransferHistory([]);
   store.setTransferOffers([]);
   store.setMatches([]);
+  store.setSeasonObjectives(seasonObjectives);
   store.setResultsHistory([]);
   store.setBootStatus('loaded');
   store.setIsLoading(false);

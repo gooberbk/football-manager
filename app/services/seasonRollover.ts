@@ -1,4 +1,10 @@
-import { buildNextSeason } from '@club-director/engine';
+import {
+  assignSeasonObjectives,
+  buildNextSeason,
+  getSeasonAnomalies,
+  isSeasonComplete,
+  settleSeasonObjectives,
+} from '@club-director/engine';
 import { saveCareer } from '../db';
 import type { CareerState } from '../db/careerPersistence';
 import type { PersistedMatch } from '../db/matchRecords';
@@ -7,6 +13,7 @@ import type {
   League,
   Player,
   Season,
+  SeasonObjective,
   TransferOffer,
   TransferRecord,
 } from '@club-director/shared-types';
@@ -50,6 +57,7 @@ interface CareerCollections {
   transferHistory: TransferRecord[];
   transferOffers: TransferOffer[];
   matches: PersistedMatch[];
+  seasonObjectives: SeasonObjective[];
   managedClubId: string;
 }
 
@@ -94,6 +102,7 @@ function snapshotCareer(
     transferHistory: state.transferHistory,
     transferOffers: state.transferOffers,
     matches: state.matches,
+    seasonObjectives: state.seasonObjectives,
     resultsHistory: state.resultsHistory,
     managedClubId,
   };
@@ -120,6 +129,7 @@ function isSameSnapshot(snapshot: CareerSnapshot): boolean {
     current.transferHistory === snapshot.transferHistory &&
     current.transferOffers === snapshot.transferOffers &&
     current.matches === snapshot.matches &&
+    current.seasonObjectives === snapshot.seasonObjectives &&
     current.resultsHistory === snapshot.resultsHistory &&
     current.managedClubId === snapshot.managedClubId
   );
@@ -149,6 +159,7 @@ function buildCareerState(input: CareerCollections): CareerState {
     transferHistory: input.transferHistory,
     transferOffers: input.transferOffers,
     matches: input.matches,
+    seasonObjectives: input.seasonObjectives,
   };
 }
 
@@ -219,14 +230,68 @@ async function performRollover(
     return { ok: false, error: 'No active career is loaded.' };
   }
   const { league, season, clubs, players } = initial;
-  const { transferHistory, transferOffers, matches, managedClubId } = initial;
+  const { transferHistory, transferOffers, matches, seasonObjectives, managedClubId } = initial;
 
+  // Step A — the finished season must be complete and anomaly-free
+  // before any settlement runs. These are the same checks
+  // buildNextSeason performs; running them first guarantees settlement
+  // never executes on an inconsistent season. Nothing is persisted yet.
+  const anomalies = getSeasonAnomalies(league, season);
+  const anomalyCount =
+    anomalies.malformedPlayedFixtures.length +
+    anomalies.orphanedUnplayedFixtures.length +
+    anomalies.invalidWeekFixtures.length;
+  if (anomalyCount > 0) {
+    return {
+      ok: false,
+      error:
+        `Cannot settle season objectives: ${anomalyCount} fixture ` +
+        `anomal${anomalyCount === 1 ? 'y' : 'ies'} ` +
+        `(${anomalies.malformedPlayedFixtures.length} malformed played, ` +
+        `${anomalies.orphanedUnplayedFixtures.length} orphaned unplayed, ` +
+        `${anomalies.invalidWeekFixtures.length} invalid week).`,
+    };
+  }
+  if (!isSeasonComplete(league, season)) {
+    return {
+      ok: false,
+      error:
+        'Cannot settle season objectives: current season is not ' +
+        'complete (every fixture must be played with finite scores).',
+    };
+  }
+
+  // Step B — settle season N objectives exactly once. Rewards come from
+  // the persisted objectives, never recomputed; transferBudget is
+  // untouched; only deferred sanctions are recorded.
+  let settledClubs: Club[];
+  let settledObjectives: SeasonObjective[];
+  try {
+    const settlement = settleSeasonObjectives({
+      seasonId: season.id,
+      league,
+      clubs,
+      objectives: seasonObjectives,
+      managedClubId,
+      settledAt: new Date(),
+    });
+    settledClubs = settlement.clubs;
+    settledObjectives = settlement.objectives;
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  // Step C — build season N+1 on the settled clubs so the new season
+  // inherits post-settlement finances.
   let next: ReturnType<typeof buildNextSeason>;
   try {
     next = buildNextSeason({
       league,
       season,
-      clubs,
+      clubs: settledClubs,
       players,
       newSeasonId: nextSeasonId(season.id),
       // advanceMatchweek already advanced currentDate one week past the
@@ -239,6 +304,56 @@ async function performRollover(
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+
+  // Step D — generate season N+1 objectives from the new season's data.
+  // seasonWeeks comes from the actually generated fixture calendar.
+  const seasonWeeks = next.league.fixtures.reduce(
+    (max, fixture) => Math.max(max, fixture.week),
+    0,
+  );
+  let nextObjectives: SeasonObjective[];
+  try {
+    nextObjectives = assignSeasonObjectives({
+      seasonId: next.season.id,
+      clubs: next.clubs,
+      players: next.players,
+      seasonWeeks,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  // Step E — full objective collection: settled history + new season.
+  // Reject any incoherence before saving: a pre-existing objective for
+  // the new season or a duplicate (seasonId, clubId) pair would corrupt
+  // settlement uniqueness guarantees.
+  if (settledObjectives.some((o) => o.seasonId === next.season.id)) {
+    return {
+      ok: false,
+      error:
+        `Cannot roll over: objectives for season '${next.season.id}' ` +
+        'already exist in the career history.',
+    };
+  }
+  const finalObjectives = [...settledObjectives, ...nextObjectives];
+  const objectiveKeys = new Set<string>();
+  for (const objective of finalObjectives) {
+    // Unambiguous pair encoding: plain concatenation could merge two
+    // distinct (seasonId, clubId) couples ('ab'+'c' === 'a'+'bc').
+    const key = JSON.stringify([objective.seasonId, objective.clubId]);
+    if (objectiveKeys.has(key)) {
+      return {
+        ok: false,
+        error:
+          `Cannot roll over: duplicate season objective for ` +
+          `season '${objective.seasonId}', club '${objective.clubId}'.`,
+      };
+    }
+    objectiveKeys.add(key);
   }
 
   if (!isSameSnapshot(initial)) {
@@ -256,6 +371,7 @@ async function performRollover(
     transferHistory,
     transferOffers,
     matches,
+    seasonObjectives: finalObjectives,
     managedClubId,
   });
 
@@ -333,6 +449,12 @@ async function performRollover(
   const store = useGameState.getState();
   store.setLeague(next.league);
   store.setSeason(next.season);
+  // Settlement produced new club objects (post-settlement finances) and
+  // buildNextSeason aged every player by one year — memory must match
+  // the persisted CareerState exactly.
+  store.setClubs(next.clubs);
+  store.setPlayers(next.players);
+  store.setSeasonObjectives(finalObjectives);
   // Ephemeral UI state from the finished season does not carry over.
   store.setResultsHistory([]);
 

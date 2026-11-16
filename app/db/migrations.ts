@@ -132,6 +132,111 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    name: 'players-club-id-nullable',
+    up: (tx) => {
+      // Contract expiry (Phase 3C-B): players.club_id becomes nullable so
+      // an expired contract can be represented as a free agent
+      // (club_id NULL = member of no club squad). SQLite cannot alter a
+      // column's nullability, so the players table is rebuilt:
+      // rename → recreate with identical columns except club_id loses
+      // NOT NULL → copy every row verbatim → drop the old table.
+      //
+      // Safety: the schema declares no FOREIGN KEY constraints anywhere
+      // (match_events.player_id and transfers.player_id are plain TEXT,
+      // not REFERENCES), and no index or trigger targets players — so
+      // the rename/rebuild cannot orphan or cascade anything. All 55
+      // columns are copied explicitly; dropping the NOT NULL on club_id
+      // is the ONLY semantic change.
+      tx.run('ALTER TABLE players RENAME TO players_pre_v6');
+      tx.run(`
+        CREATE TABLE players (
+          id TEXT PRIMARY KEY,
+          first_name TEXT NOT NULL,
+          last_name TEXT NOT NULL,
+          nationality TEXT NOT NULL,
+          age INTEGER NOT NULL,
+          preferred_foot TEXT NOT NULL,
+          primary_position TEXT NOT NULL,
+          secondary_positions TEXT NOT NULL,
+          passing INTEGER NOT NULL,
+          shooting INTEGER NOT NULL,
+          dribbling INTEGER NOT NULL,
+          tackling INTEGER NOT NULL,
+          heading INTEGER NOT NULL,
+          crossing INTEGER NOT NULL,
+          finishing INTEGER NOT NULL,
+          technique INTEGER NOT NULL,
+          long_shots INTEGER NOT NULL,
+          free_kicks INTEGER NOT NULL,
+          first_touch INTEGER NOT NULL,
+          vision INTEGER NOT NULL,
+          decisions INTEGER NOT NULL,
+          composure INTEGER NOT NULL,
+          anticipation INTEGER NOT NULL,
+          positioning INTEGER NOT NULL,
+          work_rate INTEGER NOT NULL,
+          determination INTEGER NOT NULL,
+          leadership INTEGER NOT NULL,
+          concentration INTEGER NOT NULL,
+          flair INTEGER NOT NULL,
+          pace INTEGER NOT NULL,
+          acceleration INTEGER NOT NULL,
+          stamina INTEGER NOT NULL,
+          strength INTEGER NOT NULL,
+          agility INTEGER NOT NULL,
+          balance INTEGER NOT NULL,
+          jumping INTEGER NOT NULL,
+          natural_fitness INTEGER NOT NULL,
+          current_ability INTEGER NOT NULL,
+          potential_ability INTEGER NOT NULL,
+          age_growth_curve TEXT NOT NULL,
+          morale INTEGER NOT NULL,
+          recent_form TEXT NOT NULL,
+          fitness INTEGER NOT NULL,
+          injury_type TEXT,
+          injury_days_remaining INTEGER,
+          injury_severity TEXT,
+          club_id TEXT,
+          wage INTEGER NOT NULL,
+          contract_expiry_date INTEGER NOT NULL,
+          market_value INTEGER NOT NULL
+        )
+      `);
+      tx.run(`
+        INSERT INTO players (
+          id, first_name, last_name, nationality, age, preferred_foot,
+          primary_position, secondary_positions,
+          passing, shooting, dribbling, tackling, heading, crossing,
+          finishing, technique, long_shots, free_kicks, first_touch,
+          vision, decisions, composure, anticipation, positioning,
+          work_rate, determination, leadership, concentration, flair,
+          pace, acceleration, stamina, strength, agility, balance,
+          jumping, natural_fitness,
+          current_ability, potential_ability, age_growth_curve,
+          morale, recent_form, fitness,
+          injury_type, injury_days_remaining, injury_severity,
+          club_id, wage, contract_expiry_date, market_value
+        )
+        SELECT
+          id, first_name, last_name, nationality, age, preferred_foot,
+          primary_position, secondary_positions,
+          passing, shooting, dribbling, tackling, heading, crossing,
+          finishing, technique, long_shots, free_kicks, first_touch,
+          vision, decisions, composure, anticipation, positioning,
+          work_rate, determination, leadership, concentration, flair,
+          pace, acceleration, stamina, strength, agility, balance,
+          jumping, natural_fitness,
+          current_ability, potential_ability, age_growth_curve,
+          morale, recent_form, fitness,
+          injury_type, injury_days_remaining, injury_severity,
+          club_id, wage, contract_expiry_date, market_value
+        FROM players_pre_v6
+      `);
+      tx.run('DROP TABLE players_pre_v6');
+    },
+  },
 ];
 
 /** Latest schema version supported by this build of the app. */

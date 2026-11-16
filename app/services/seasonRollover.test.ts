@@ -1,4 +1,5 @@
 import {
+  assignSeasonObjectives,
   computeStandings,
   generateFixtures,
   generateSeedData,
@@ -11,6 +12,7 @@ import type {
   MatchResult,
   Player,
   Season,
+  SeasonObjective,
   TransferOffer,
   TransferRecord,
 } from '@club-director/shared-types';
@@ -41,6 +43,7 @@ interface CompletedCareer {
   transferHistory: TransferRecord[];
   transferOffers: TransferOffer[];
   matches: PersistedMatch[];
+  seasonObjectives: SeasonObjective[];
 }
 
 /**
@@ -51,7 +54,9 @@ interface CompletedCareer {
  */
 function buildCompletedCareer(): CompletedCareer {
   const seedData = generateSeedData(777);
-  const clubs = seedData.clubs.slice(0, 3);
+  // The objective system is defined for the 16-club championship — the
+  // fixture must use the full league or rollover cannot settle/generate.
+  const clubs = seedData.clubs;
   const players = seedData.players.filter((p) =>
     clubs.some((c) => c.squad.includes(p.id)),
   );
@@ -160,6 +165,15 @@ function buildCompletedCareer(): CompletedCareer {
     }),
   ];
 
+  // Season-1 objectives assigned by the real engine function — the same
+  // way a live career would have received them at season start.
+  const seasonObjectives = assignSeasonObjectives({
+    seasonId: season.id,
+    clubs,
+    players,
+    seasonWeeks: lastWeek,
+  });
+
   return {
     clubs,
     players,
@@ -168,6 +182,7 @@ function buildCompletedCareer(): CompletedCareer {
     transferHistory,
     transferOffers,
     matches,
+    seasonObjectives,
   };
 }
 
@@ -181,6 +196,7 @@ function populateStore(store: any, career: CompletedCareer) {
   store.setTransferHistory(career.transferHistory);
   store.setTransferOffers(career.transferOffers);
   store.setMatches(career.matches);
+  store.setSeasonObjectives(career.seasonObjectives);
   store.setManagedClubId(career.clubs[0].id);
   store.setBootStatus('loaded');
   store.setIsLoading(false);
@@ -244,8 +260,23 @@ describe('rolloverSeason (unit, mocked persistence)', () => {
     expect(saved.matches).toBe(career.matches);
     expect(saved.transferHistory).toBe(career.transferHistory);
     expect(saved.transferOffers).toBe(career.transferOffers);
-    expect(saved.clubs).toBe(career.clubs);
-    expect(saved.players).toBe(career.players);
+    // Clubs are the settled copies — same ids/squads, post-settlement
+    // finances — never the pre-settlement references.
+    expect(saved.clubs.map((c) => c.id)).toEqual(
+      career.clubs.map((c) => c.id),
+    );
+    expect(saved.clubs).not.toBe(career.clubs);
+    // Players are aged exactly +1 by buildNextSeason — new objects with
+    // identical ids and preserved fields, never the input references.
+    expect(saved.players).not.toBe(career.players);
+    expect(saved.players.map((p) => p.id)).toEqual(
+      career.players.map((p) => p.id),
+    );
+    saved.players.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age + 1);
+    });
+    // The store publishes the same aged collection that was persisted.
+    expect(store.players).toBe(saved.players);
     expect(mockSaveCareer).not.toHaveBeenCalled();
   });
 
@@ -585,6 +616,180 @@ describe('rolloverSeason (unit, mocked persistence)', () => {
       expect(getStore().season?.id).toBe('season-1');
     },
   );
+
+  it('refuses when a season objective is missing', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    populateStore(getStore(), career);
+    // Drop one objective: settlement must reject, never settle partially.
+    getStore().setSeasonObjectives(career.seasonObjectives.slice(1));
+    const mockSave = jest.fn().mockResolvedValue(undefined);
+
+    const result = await rolloverSeason({ saveCareerFn: mockSave });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/objective/i);
+    }
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(getStore().season?.id).toBe('season-1');
+  });
+
+  it('refuses when a season objective is duplicated', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    populateStore(getStore(), career);
+    getStore().setSeasonObjectives([
+      ...career.seasonObjectives,
+      career.seasonObjectives[0],
+    ]);
+    const mockSave = jest.fn().mockResolvedValue(undefined);
+
+    const result = await rolloverSeason({ saveCareerFn: mockSave });
+
+    expect(result.ok).toBe(false);
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(getStore().season?.id).toBe('season-1');
+  });
+
+  it('refuses when objectives for the next season already exist', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    populateStore(getStore(), career);
+    getStore().setSeasonObjectives([
+      ...career.seasonObjectives,
+      {
+        ...career.seasonObjectives[0],
+        seasonId: 'season-2',
+      },
+    ]);
+    const mockSave = jest.fn().mockResolvedValue(undefined);
+
+    const result = await rolloverSeason({ saveCareerFn: mockSave });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/already exist/);
+    }
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it('accepts distinct (seasonId, clubId) pairs that naive concatenation would merge', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    // 'season-'+'0x' === 'season-0'+'x' === 'season-0x' under plain string
+    // concatenation — two genuinely different couples. Both are historical
+    // (neither is season-1 nor the upcoming season-2), so they must pass
+    // through untouched.
+    const collisions: SeasonObjective[] = [
+      { ...career.seasonObjectives[0], seasonId: 'season-', clubId: '0x' },
+      { ...career.seasonObjectives[0], seasonId: 'season-0', clubId: 'x' },
+    ];
+    populateStore(getStore(), {
+      ...career,
+      seasonObjectives: [...career.seasonObjectives, ...collisions],
+    });
+    const mockSave = jest.fn().mockResolvedValue(undefined);
+
+    const result = await rolloverSeason({ saveCareerFn: mockSave });
+
+    expect(result.ok).toBe(true);
+    expect(mockSave).toHaveBeenCalledTimes(1);
+    const saved = mockSave.mock.calls[0][0] as CareerState;
+    // Both collision pairs survived verbatim alongside history + season-2.
+    expect(
+      saved.seasonObjectives.filter((o) => o.seasonId === 'season-'),
+    ).toHaveLength(1);
+    expect(
+      saved.seasonObjectives.filter((o) => o.seasonId === 'season-0'),
+    ).toHaveLength(1);
+    expect(saved.seasonObjectives).toHaveLength(34);
+  });
+
+  it('still rejects a true duplicate (seasonId, clubId) pair', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    const duplicate: SeasonObjective = {
+      ...career.seasonObjectives[0],
+      seasonId: 'season-0',
+      clubId: 'club-x',
+      objectiveMet: true,
+      rewardPaid: 1_000_000,
+      debtRemaining: 0,
+      settledAt: new Date('2024-06-01T00:00:00Z'),
+    };
+    populateStore(getStore(), {
+      ...career,
+      seasonObjectives: [
+        ...career.seasonObjectives,
+        duplicate,
+        { ...duplicate },
+      ],
+    });
+    const mockSave = jest.fn().mockResolvedValue(undefined);
+
+    const result = await rolloverSeason({ saveCareerFn: mockSave });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/duplicate season objective/);
+    }
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(getStore().season?.id).toBe('season-1');
+  });
+
+  it('keeps legitimate historical objectives alongside the new season', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    const history: SeasonObjective = {
+      ...career.seasonObjectives[0],
+      seasonId: 'season-0',
+      clubId: career.clubs[0].id,
+      objectiveMet: true,
+      rewardPaid: 1_000_000,
+      debtRemaining: 0,
+      settledAt: new Date('2024-06-01T00:00:00Z'),
+    };
+    populateStore(getStore(), {
+      ...career,
+      seasonObjectives: [...career.seasonObjectives, history],
+    });
+    const mockSave = jest.fn().mockResolvedValue(undefined);
+
+    const result = await rolloverSeason({ saveCareerFn: mockSave });
+
+    expect(result.ok).toBe(true);
+    const saved = mockSave.mock.calls[0][0] as CareerState;
+    expect(saved.seasonObjectives).toHaveLength(33);
+    expect(saved.seasonObjectives).toContainEqual(history);
+  });
+
+  it('rejects when objectives change between commit and publish', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    populateStore(getStore(), career);
+
+    const tamperedObjectives = career.seasonObjectives.slice(0, -1);
+    const mockSave = jest.fn().mockImplementation(() => {
+      queueMicrotask(() =>
+        getStore().setSeasonObjectives(tamperedObjectives),
+      );
+      return Promise.resolve();
+    });
+
+    const result = await rolloverSeason({ saveCareerFn: mockSave });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/changed while/);
+    }
+    // The tampered collection was preserved, never clobbered.
+    expect(getStore().seasonObjectives).toBe(tamperedObjectives);
+    // Compensation carried the latest in-memory objectives.
+    const compensation = mockSave.mock.calls[1][0] as CareerState;
+    expect(compensation.seasonObjectives).toBe(tamperedObjectives);
+    expect(compensation.season.id).toBe('season-1');
+  });
 });
 
 describe('rolloverSeason (real SQLite)', () => {
@@ -623,6 +828,7 @@ describe('rolloverSeason (real SQLite)', () => {
         transferHistory: career.transferHistory,
         transferOffers: career.transferOffers,
         matches: career.matches,
+        seasonObjectives: career.seasonObjectives,
       },
       testDb,
     );
@@ -660,6 +866,122 @@ describe('rolloverSeason (real SQLite)', () => {
     expect(loaded!.transferOffers).toEqual(career.transferOffers);
   });
 
+  it('publishes and persists players aged exactly +1 year', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    await saveCareerImpl(
+      {
+        career: {
+          id: 'active',
+          managerName: 'Rollover Manager',
+          managedClubId: career.clubs[0].id,
+          createdAt: new Date('2024-08-01'),
+          lastPlayedAt: new Date(),
+          schemaVersion: 1,
+        },
+        clubs: career.clubs,
+        players: career.players,
+        league: career.league,
+        season: career.season,
+        transferHistory: career.transferHistory,
+        transferOffers: career.transferOffers,
+        matches: career.matches,
+        seasonObjectives: career.seasonObjectives,
+      },
+      testDb,
+    );
+    populateStore(getStore(), career);
+
+    const result = await rolloverSeason({ saveCareerFn: realSave });
+    expect(result.ok).toBe(true);
+
+    // Store: every player aged exactly once, order and ids preserved.
+    const storePlayers = getStore().players;
+    expect(storePlayers.map((p) => p.id)).toEqual(
+      career.players.map((p) => p.id),
+    );
+    storePlayers.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age + 1);
+      expect(player.development).toEqual(career.players[index].development);
+      expect(player.attributes).toEqual(career.players[index].attributes);
+      expect(player.contract).toEqual(career.players[index].contract);
+      expect(player).not.toBe(career.players[index]);
+    });
+
+    // Database: the persisted players are the same aged collection —
+    // memory and disk agree exactly.
+    const loaded = await loadCareerImpl(testDb);
+    expect(loaded!.players.map((p) => p.id)).toEqual(
+      storePlayers.map((p) => p.id),
+    );
+    loaded!.players.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age + 1);
+    });
+    // Squad references still resolve after aging.
+    loaded!.clubs.forEach((club) => {
+      club.squad.forEach((id) => {
+        expect(loaded!.players.some((p) => p.id === id)).toBe(true);
+      });
+    });
+  });
+
+  it('keeps players un-aged in the store when the save fails, then ages once on retry', async () => {
+    const { rolloverSeason, getStore } = await freshRollover();
+    const career = buildCompletedCareer();
+    await saveCareerImpl(
+      {
+        career: {
+          id: 'active',
+          managerName: 'Rollover Manager',
+          managedClubId: career.clubs[0].id,
+          createdAt: new Date('2024-08-01'),
+          lastPlayedAt: new Date(),
+          schemaVersion: 1,
+        },
+        clubs: career.clubs,
+        players: career.players,
+        league: career.league,
+        season: career.season,
+        transferHistory: career.transferHistory,
+        transferOffers: career.transferOffers,
+        matches: career.matches,
+        seasonObjectives: career.seasonObjectives,
+      },
+      testDb,
+    );
+    populateStore(getStore(), career);
+
+    // Force the rollover save to fail mid-transaction.
+    testDb.run(`
+      CREATE TRIGGER fail_rollover_players
+      BEFORE INSERT ON players
+      BEGIN
+        SELECT RAISE(ABORT, 'injected player-save failure');
+      END
+    `);
+    const failed = await rolloverSeason({ saveCareerFn: realSave });
+    testDb.run('DROP TRIGGER IF EXISTS fail_rollover_players');
+    expect(failed.ok).toBe(false);
+
+    // No publish happened: the store still holds the un-aged players.
+    expect(getStore().players).toBe(career.players);
+    getStore().players.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age);
+    });
+
+    // Retry from the same un-aged state: exactly one aging, not two.
+    const retried = await rolloverSeason({ saveCareerFn: realSave });
+    expect(retried.ok).toBe(true);
+    getStore().players.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age + 1);
+    });
+    const loaded = await loadCareerImpl(testDb);
+    expect(loaded!.season.id).toBe('season-2');
+    loaded!.players.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age + 1);
+    });
+  });
+
   it('rolls back the whole save when persistence fails mid-transaction', async () => {
     const { rolloverSeason, getStore } = await freshRollover();
     const career = buildCompletedCareer();
@@ -680,6 +1002,7 @@ describe('rolloverSeason (real SQLite)', () => {
         transferHistory: career.transferHistory,
         transferOffers: career.transferOffers,
         matches: career.matches,
+        seasonObjectives: career.seasonObjectives,
       },
       testDb,
     );
@@ -731,6 +1054,7 @@ describe('rolloverSeason (real SQLite)', () => {
         transferHistory: career.transferHistory,
         transferOffers: career.transferOffers,
         matches: career.matches,
+        seasonObjectives: career.seasonObjectives,
       },
       testDb,
     );
@@ -742,10 +1066,15 @@ describe('rolloverSeason (real SQLite)', () => {
     // continuation's staleness check.
     const tamperedSeason: Season = { ...career.season, currentWeek: 999 };
     let calls = 0;
+    const compensatedStates: CareerState[] = [];
     const saveWithConcurrentMutation = async (state: CareerState) => {
       calls += 1;
       if (calls === 1) {
         queueMicrotask(() => getStore().setSeason(tamperedSeason));
+      } else {
+        // The compensating save must carry the LATEST in-memory career —
+        // whose players were never published as aged.
+        compensatedStates.push(state);
       }
       await saveCareerImpl(state, testDb);
     };
@@ -758,17 +1087,32 @@ describe('rolloverSeason (real SQLite)', () => {
     if (!result.ok) expect(result.error).toMatch(/restored to the latest/);
     expect(calls).toBe(2);
 
-    // The compensating save rewrote the database with the LATEST
-    // in-memory career — loadCareer sees season-1 (tampered), never
-    // the accidentally committed season-2.
+    // The compensating save persisted UN-AGED players: exactly the
+    // memory snapshot's ages, never the aged next.players collection.
+    expect(compensatedStates).toHaveLength(1);
+    const compensatedPlayers = compensatedStates[0].players;
+    expect(compensatedPlayers.map((p) => p.id)).toEqual(
+      career.players.map((p) => p.id),
+    );
+    compensatedPlayers.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age);
+    });
+
+    // After reload, persisted players still carry their original ages —
+    // the accidentally committed aged collection was fully overwritten.
     const loaded = await loadCareerImpl(testDb);
     expect(loaded!.season.id).toBe('season-1');
     expect(loaded!.season.currentWeek).toBe(999);
     expect(loaded!.league.fixtures.every((f) => f.played)).toBe(true);
     expect(loaded!.matches).toHaveLength(career.matches.length);
+    loaded!.players.forEach((player, index) => {
+      expect(player.age).toBe(career.players[index].age);
+    });
 
-    // Memory and database agree on the concurrent state.
+    // Memory and database agree on the concurrent state — including the
+    // un-aged players that were never published.
     expect(getStore().season).toBe(tamperedSeason);
+    expect(getStore().players).toBe(career.players);
   });
 
   it('re-compensates with the newest state when the store mutates during a compensation save', async () => {
@@ -791,6 +1135,7 @@ describe('rolloverSeason (real SQLite)', () => {
         transferHistory: career.transferHistory,
         transferOffers: career.transferOffers,
         matches: career.matches,
+        seasonObjectives: career.seasonObjectives,
       },
       testDb,
     );
@@ -831,5 +1176,288 @@ describe('rolloverSeason (real SQLite)', () => {
 
     // season-2 was never published to the store.
     expect(getStore().season).toBe(tamperedSecond);
+  });
+
+  describe('season objective lifecycle', () => {
+    const seedCareer = (career: CompletedCareer) =>
+      saveCareerImpl(
+        {
+          career: {
+            id: 'active',
+            managerName: 'Rollover Manager',
+            managedClubId: career.clubs[0].id,
+            createdAt: new Date('2024-08-01'),
+            lastPlayedAt: new Date(),
+            schemaVersion: 1,
+          },
+          clubs: career.clubs,
+          players: career.players,
+          league: career.league,
+          season: career.season,
+          transferHistory: career.transferHistory,
+          transferOffers: career.transferOffers,
+          matches: career.matches,
+          seasonObjectives: career.seasonObjectives,
+        },
+        testDb,
+      );
+
+    it('settles season-1 objectives once and generates fresh season-2 objectives', async () => {
+      const { rolloverSeason, getStore } = await freshRollover();
+      const career = buildCompletedCareer();
+      await seedCareer(career);
+      populateStore(getStore(), career);
+
+      const result = await rolloverSeason({ saveCareerFn: realSave });
+      expect(result.ok).toBe(true);
+
+      const loaded = await loadCareerImpl(testDb);
+      expect(loaded).not.toBeNull();
+      const s1 = loaded!.seasonObjectives.filter(
+        (o) => o.seasonId === 'season-1',
+      );
+      const s2 = loaded!.seasonObjectives.filter(
+        (o) => o.seasonId === 'season-2',
+      );
+      // One objective per club per season, history preserved.
+      expect(s1).toHaveLength(16);
+      expect(s2).toHaveLength(16);
+      expect(loaded!.seasonObjectives).toHaveLength(32);
+
+      // Season-1 objectives settled exactly once, rewards never recomputed.
+      const s1ByKey = new Map(s1.map((o) => [o.clubId, o]));
+      for (const original of career.seasonObjectives) {
+        const settled = s1ByKey.get(original.clubId)!;
+        expect(settled.targetPosition).toBe(original.targetPosition);
+        expect(settled.rewardAmount).toBe(original.rewardAmount);
+        expect(settled.ambition).toBe(original.ambition);
+        expect(settled.settledAt).toBeInstanceOf(Date);
+        expect(typeof settled.objectiveMet).toBe('boolean');
+        expect(settled.objectiveMet).toBe(
+          (career.league.standings.entries.findIndex(
+            (e) => e.clubId === original.clubId,
+          ) + 1) <= original.targetPosition,
+        );
+        expect(settled.rewardPaid).toBe(
+          settled.objectiveMet ? settled.rewardAmount : 0,
+        );
+      }
+
+      // Season-2 objectives are freshly generated, unsettled, and equal
+      // the deterministic engine output on the post-settlement state.
+      for (const objective of s2) {
+        expect(objective.objectiveMet).toBeNull();
+        expect(objective.rewardPaid).toBe(0);
+        expect(objective.debtRemaining).toBeNull();
+        expect(objective.settledAt).toBeNull();
+        expect(objective.sanction).toBe('none');
+      }
+      const seasonWeeks = Math.max(
+        ...loaded!.league.fixtures.map((f) => f.week),
+      );
+      const byClubId = (a: SeasonObjective, b: SeasonObjective) =>
+        a.clubId < b.clubId ? -1 : a.clubId > b.clubId ? 1 : 0;
+      expect([...s2].sort(byClubId)).toEqual(
+        assignSeasonObjectives({
+          seasonId: 'season-2',
+          clubs: loaded!.clubs,
+          players: loaded!.players,
+          seasonWeeks,
+        }).sort(byClubId),
+      );
+
+      // No duplicate (seasonId, clubId) anywhere in the collection.
+      const keys = new Set(
+        loaded!.seasonObjectives.map((o) => `${o.seasonId}${o.clubId}`),
+      );
+      expect(keys.size).toBe(loaded!.seasonObjectives.length);
+
+      // The store carries the same complete collection.
+      expect(getStore().seasonObjectives).toHaveLength(32);
+    });
+
+    it('applies settlement finances to the clubs carried into season-2', async () => {
+      const { rolloverSeason, getStore } = await freshRollover();
+      const career = buildCompletedCareer();
+
+      // Inject debts sized to exercise both branches: club A debt far
+      // below any reward, club B debt far above any reward.
+      const clubA = career.clubs[4];
+      const clubB = career.clubs[9];
+      clubA.finances.debt = 1;
+      clubB.finances.debt = 900_000_000_000;
+      const balanceABefore = clubA.finances.balance;
+      const balanceBBefore = clubB.finances.balance;
+      const debtBBefore = clubB.finances.debt;
+
+      await seedCareer(career);
+      populateStore(getStore(), career);
+
+      const result = await rolloverSeason({ saveCareerFn: realSave });
+      expect(result.ok).toBe(true);
+
+      const loaded = await loadCareerImpl(testDb);
+      const loadedA = loaded!.clubs.find((c) => c.id === clubA.id)!;
+      const loadedB = loaded!.clubs.find((c) => c.id === clubB.id)!;
+      const objA = loaded!.seasonObjectives.find(
+        (o) => o.seasonId === 'season-1' && o.clubId === clubA.id,
+      )!;
+      const objB = loaded!.seasonObjectives.find(
+        (o) => o.seasonId === 'season-1' && o.clubId === clubB.id,
+      )!;
+
+      // Exact settlement math, whichever branch each club landed on.
+      for (const [club, obj, balanceBefore, debtBefore] of [
+        [loadedA, objA, balanceABefore, 1],
+        [loadedB, objB, balanceBBefore, debtBBefore],
+      ] as const) {
+        const met = obj.objectiveMet === true;
+        const rewardPaid = met ? obj.rewardAmount : 0;
+        const debtRepaid = met ? Math.min(obj.rewardAmount, debtBefore) : 0;
+        expect(obj.rewardPaid).toBe(rewardPaid);
+        expect(obj.debtRemaining).toBe(debtBefore - debtRepaid);
+        expect(club.finances.balance).toBe(
+          balanceBefore + (rewardPaid - debtRepaid),
+        );
+        expect(club.finances.debt).toBe(debtBefore - debtRepaid);
+        // transferBudget is never touched by settlement.
+        expect(club.finances.transferBudget).toBe(
+          career.clubs.find((c) => c.id === club.id)!.finances
+            .transferBudget,
+        );
+      }
+      // Club A's tiny debt is always fully repaid when met.
+      if (objA.objectiveMet) {
+        expect(loadedA.finances.debt).toBe(0);
+      }
+      // Club B's huge debt can never be fully repaid.
+      expect(loadedB.finances.debt).toBeGreaterThan(0);
+    });
+
+    it('records a pending sanction only for the managed club with residual debt', async () => {
+      const { rolloverSeason, getStore } = await freshRollover();
+      const career = buildCompletedCareer();
+
+      // Force two clubs to miss their objectives: set each target one
+      // position below its actual final standing (position > 1 clubs
+      // only — a winner cannot miss).
+      const positionOf = (clubId: string) =>
+        career.league.standings.entries.findIndex((e) => e.clubId === clubId) + 1;
+      const finishers = career.clubs
+        .map((c) => ({ club: c, position: positionOf(c.id) }))
+        .filter(({ position }) => position > 1);
+      const managedPick = finishers[0];
+      const aiPick = finishers[1];
+      for (const pick of [managedPick, aiPick]) {
+        const objective = career.seasonObjectives.find(
+          (o) => o.clubId === pick.club.id,
+        )!;
+        objective.targetPosition = pick.position - 1;
+        pick.club.finances.debt = 5_000_000;
+      }
+
+      await seedCareer(career);
+      populateStore(getStore(), career);
+      // The managed club is the forced-miss club, not clubs[0].
+      getStore().setManagedClubId(managedPick.club.id);
+
+      const result = await rolloverSeason({ saveCareerFn: realSave });
+      expect(result.ok).toBe(true);
+
+      const loaded = await loadCareerImpl(testDb);
+      const managedObjective = loaded!.seasonObjectives.find(
+        (o) => o.seasonId === 'season-1' && o.clubId === managedPick.club.id,
+      )!;
+      const aiObjective = loaded!.seasonObjectives.find(
+        (o) => o.seasonId === 'season-1' && o.clubId === aiPick.club.id,
+      )!;
+
+      expect(managedObjective.objectiveMet).toBe(false);
+      expect(managedObjective.debtRemaining).toBe(5_000_000);
+      expect(managedObjective.sanction).toBe(
+        'dismissal_relegation_pending',
+      );
+      // Identical situation for an AI club: debt recorded, no sanction.
+      expect(aiObjective.objectiveMet).toBe(false);
+      expect(aiObjective.debtRemaining).toBe(5_000_000);
+      expect(aiObjective.sanction).toBe('none');
+      // Every other objective stays 'none'.
+      expect(
+        loaded!.seasonObjectives.filter(
+          (o) => o.sanction === 'dismissal_relegation_pending',
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('accumulates objectives across successive rollovers without duplicates', async () => {
+      const { rolloverSeason, getStore } = await freshRollover();
+      const career = buildCompletedCareer();
+      await seedCareer(career);
+      populateStore(getStore(), career);
+
+      expect(
+        (await rolloverSeason({ saveCareerFn: realSave })).ok,
+      ).toBe(true);
+
+      // Complete season-2 in memory exactly like advanceMatchweek
+      // would leave it, then roll over again.
+      const store = getStore();
+      const playedFixtures = store.league!.fixtures.map((f, i) => ({
+        ...f,
+        played: true,
+        homeScore: i % 3,
+        awayScore: (i + 1) % 3,
+      }));
+      const lastWeek = playedFixtures.reduce(
+        (max, f) => Math.max(max, f.week),
+        0,
+      );
+      const lastDate = playedFixtures.reduce(
+        (max, f) => (f.date.getTime() > max.getTime() ? f.date : max),
+        playedFixtures[0].date,
+      );
+      const nextDate = new Date(lastDate);
+      nextDate.setDate(nextDate.getDate() + 7);
+      const league2 = {
+        ...store.league!,
+        fixtures: playedFixtures,
+      };
+      league2.standings = computeStandings(league2);
+      store.setLeague(league2);
+      store.setSeason({
+        ...store.season!,
+        currentWeek: lastWeek + 1,
+        currentDate: nextDate,
+      });
+
+      expect(
+        (await rolloverSeason({ saveCareerFn: realSave })).ok,
+      ).toBe(true);
+
+      const loaded = await loadCareerImpl(testDb);
+      expect(loaded!.season.id).toBe('season-3');
+      const counts = new Map<string, number>();
+      for (const o of loaded!.seasonObjectives) {
+        counts.set(o.seasonId, (counts.get(o.seasonId) ?? 0) + 1);
+      }
+      expect(counts.get('season-1')).toBe(16);
+      expect(counts.get('season-2')).toBe(16);
+      expect(counts.get('season-3')).toBe(16);
+      // Seasons 1 and 2 are settled; season 3 is fresh.
+      expect(
+        loaded!.seasonObjectives.filter(
+          (o) => o.seasonId !== 'season-3' && o.settledAt === null,
+        ),
+      ).toHaveLength(0);
+      expect(
+        loaded!.seasonObjectives.filter(
+          (o) => o.seasonId === 'season-3' && o.settledAt !== null,
+        ),
+      ).toHaveLength(0);
+      const keys = new Set(
+        loaded!.seasonObjectives.map((o) => `${o.seasonId}${o.clubId}`),
+      );
+      expect(keys.size).toBe(loaded!.seasonObjectives.length);
+    });
   });
 });

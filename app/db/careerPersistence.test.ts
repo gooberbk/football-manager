@@ -10,6 +10,7 @@ import type {
   TransferRecord,
   TransferOffer,
   StandingEntry,
+  SeasonObjective,
 } from '@club-director/shared-types';
 import { buildPersistedMatch, type PersistedMatch } from './matchRecords';
 import { saveCareer, loadCareer, deleteCareer } from './careerPersistence';
@@ -51,6 +52,7 @@ const buildState = () => {
     },
     transferHistory: [],
     transferOffers: [] as TransferOffer[],
+    seasonObjectives: [] as SeasonObjective[],
   };
 };
 
@@ -65,6 +67,22 @@ const makeOffer = (
   offerAmount: 500_000,
   status: 'pending',
   createdAt: new Date('2024-08-10T12:00:00Z'),
+  ...overrides,
+});
+
+const makeObjective = (
+  overrides: Partial<SeasonObjective> = {},
+): SeasonObjective => ({
+  seasonId: 'season-1',
+  clubId: 'club-1',
+  targetPosition: 4,
+  rewardAmount: 2_500_000,
+  ambition: 'upper_table',
+  objectiveMet: null,
+  rewardPaid: 0,
+  debtRemaining: null,
+  settledAt: null,
+  sanction: 'none',
   ...overrides,
 });
 
@@ -141,6 +159,7 @@ describe('Career Persistence (Real SQLite)', () => {
       season,
       transferHistory,
       transferOffers: [],
+      seasonObjectives: [],
     };
 
     // Call the real saveCareer() against the test SQLite instance
@@ -264,6 +283,7 @@ describe('Career Persistence (Real SQLite)', () => {
       season,
       transferHistory: [],
       transferOffers: [],
+      seasonObjectives: [],
     };
 
     // Save initial state
@@ -413,6 +433,7 @@ describe('Career Persistence (Real SQLite)', () => {
       season,
       transferHistory: [],
       transferOffers: [],
+      seasonObjectives: [],
     };
 
     await saveCareer(careerState, testDb);
@@ -523,6 +544,7 @@ describe('Career Persistence (Real SQLite)', () => {
       season,
       transferHistory,
       transferOffers: [],
+      seasonObjectives: [],
     };
 
     // Save with transfer
@@ -550,6 +572,41 @@ describe('Career Persistence (Real SQLite)', () => {
     expect(loaded!.transferHistory[0].fromClubId).toBe(clubs[1].id);
     expect(loaded!.transferHistory[0].toClubId).toBe(clubs[0].id);
     expect(loaded!.transferHistory[0].fee).toBe(transferFee);
+  });
+
+  it('round-trips a free agent (clubId null) outside every squad', async () => {
+    const state = buildState();
+    // Simulate the engine's contract-expiry output: clubId null AND the
+    // id removed from the club squad — the two must stay consistent.
+    const freeAgent = state.players[0];
+    const formerClub = state.clubs.find((c) =>
+      c.squad.includes(freeAgent.id),
+    )!;
+    freeAgent.contract = { ...freeAgent.contract, clubId: null };
+    formerClub.squad = formerClub.squad.filter((id) => id !== freeAgent.id);
+
+    await saveCareer(state, testDb);
+    const loaded = await loadCareer(testDb);
+
+    const reloaded = loaded!.players.find((p) => p.id === freeAgent.id)!;
+    expect(reloaded.contract.clubId).toBeNull();
+    // Squad membership is rebuilt from contract.clubId at load: a null
+    // clubId means the player lands in NO club's squad.
+    for (const club of loaded!.clubs) {
+      expect(club.squad).not.toContain(freeAgent.id);
+    }
+    // Contract terms survive untouched.
+    expect(reloaded.contract.wage).toBe(freeAgent.contract.wage);
+    expect(reloaded.contract.contractExpiryDate.getTime())
+      .toBe(freeAgent.contract.contractExpiryDate.getTime());
+    // Every other player keeps their club and squad slot.
+    const stillEmployed = loaded!.players.find(
+      (p) => p.id !== freeAgent.id && p.contract.clubId !== null,
+    )!;
+    const employer = loaded!.clubs.find(
+      (c) => c.id === stillEmployed.contract.clubId,
+    )!;
+    expect(employer.squad).toContain(stillEmployed.id);
   });
 
   it('should handle career overwrite through SQLite', async () => {
@@ -587,6 +644,7 @@ describe('Career Persistence (Real SQLite)', () => {
       },
       transferHistory: [],
       transferOffers: [],
+      seasonObjectives: [],
     };
 
     await saveCareer(careerState1, testDb);
@@ -625,6 +683,7 @@ describe('Career Persistence (Real SQLite)', () => {
       },
       transferHistory: [],
       transferOffers: [],
+      seasonObjectives: [],
     };
 
     await saveCareer(careerState2, testDb);
@@ -656,6 +715,7 @@ describe('Career Persistence (Real SQLite)', () => {
       matchEvents: await testDb.select().from(schema.matchEvents),
       transfers: await testDb.select().from(schema.transfers),
       transferOffers: await testDb.select().from(schema.transferOffers),
+      seasonObjectives: await testDb.select().from(schema.seasonObjectives),
     });
 
     const buildCareerState = (
@@ -697,6 +757,7 @@ describe('Career Persistence (Real SQLite)', () => {
         },
         transferHistory: [],
         transferOffers: [],
+        seasonObjectives: [],
       };
     };
 
@@ -875,6 +936,7 @@ describe('Career Persistence (Real SQLite)', () => {
         matchEvents: await testDb.select().from(schema.matchEvents),
         transfers: await testDb.select().from(schema.transfers),
         transferOffers: await testDb.select().from(schema.transferOffers),
+        seasonObjectives: await testDb.select().from(schema.seasonObjectives),
       });
       const beforeSnapshot = await snapshotAll();
       expect(beforeSnapshot.transferOffers).toHaveLength(1);
@@ -1199,6 +1261,7 @@ describe('Career Persistence (Real SQLite)', () => {
       matchEvents: await testDb.select().from(schema.matchEvents),
       transfers: await testDb.select().from(schema.transfers),
       transferOffers: await testDb.select().from(schema.transferOffers),
+      seasonObjectives: await testDb.select().from(schema.seasonObjectives),
     });
 
     const seedMatchData = (state: ReturnType<typeof buildState>) => {
@@ -1294,6 +1357,106 @@ describe('Career Persistence (Real SQLite)', () => {
       expect(loaded).not.toBeNull();
       expect(loaded!.career.managerName).toBe('Offer Manager');
       expect(loaded!.transferOffers).toHaveLength(1);
+    });
+
+    it('removes season objectives of every season along with the career', async () => {
+      const state = buildState();
+      state.seasonObjectives = [
+        makeObjective({ clubId: state.clubs[0].id }),
+        makeObjective({
+          clubId: state.clubs[1].id,
+          ambition: 'mid_table',
+          objectiveMet: true,
+          rewardPaid: 2_500_000,
+          debtRemaining: 0,
+          settledAt: new Date('2025-05-24T00:00:00.000Z'),
+        }),
+        makeObjective({
+          seasonId: 'season-2',
+          clubId: state.clubs[0].id,
+          targetPosition: 1,
+          ambition: 'title_favorite',
+        }),
+      ];
+      await saveCareer(state, testDb);
+      expect(
+        await testDb.select().from(schema.seasonObjectives),
+      ).toHaveLength(3);
+
+      await deleteCareer(testDb);
+
+      // No orphaned objective survives the career.
+      expect(
+        await testDb.select().from(schema.seasonObjectives),
+      ).toHaveLength(0);
+      const remaining = await careerTables();
+      for (const [table, rows] of Object.entries(remaining)) {
+        expect(`${table}: ${rows.length}`).toBe(`${table}: 0`);
+      }
+      expect(await loadCareer(testDb)).toBeNull();
+    });
+
+    it('does not leak deleted-career objectives into the next career', async () => {
+      const careerA = buildState();
+      careerA.career.managerName = 'Career A';
+      careerA.seasonObjectives = [
+        makeObjective({ clubId: careerA.clubs[0].id }),
+        makeObjective({
+          seasonId: 'season-0',
+          clubId: careerA.clubs[1].id,
+          ambition: 'survival',
+        }),
+      ];
+      await saveCareer(careerA, testDb);
+      await deleteCareer(testDb);
+
+      // Career B saved without objectives must load a clean slate.
+      const careerB = buildState();
+      careerB.career.managerName = 'Career B';
+      careerB.seasonObjectives = [];
+      await saveCareer(careerB, testDb);
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.career.managerName).toBe('Career B');
+      expect(loaded!.seasonObjectives).toEqual([]);
+    });
+
+    it('rolls back the deletion when a season_objectives delete fails', async () => {
+      const state = buildState();
+      state.seasonObjectives = [
+        makeObjective({ clubId: state.clubs[0].id }),
+      ];
+      await saveCareer(state, testDb);
+
+      const objectivesBefore = await testDb
+        .select()
+        .from(schema.seasonObjectives);
+      expect(objectivesBefore).toHaveLength(1);
+
+      // Same real-SQLite failure injection already used for players:
+      // abort the season_objectives delete, which runs late in the
+      // deletion order.
+      testDb.run(`
+        CREATE TRIGGER fail_delete_objectives_test
+        BEFORE DELETE ON season_objectives
+        BEGIN
+          SELECT RAISE(ABORT, 'injected objectives delete failure');
+        END
+      `);
+
+      await expect(deleteCareer(testDb)).rejects.toThrow(
+        /injected objectives delete failure/,
+      );
+      testDb.run('DROP TRIGGER fail_delete_objectives_test');
+
+      // The whole deletion rolled back: career and objectives intact.
+      expect(
+        await testDb.select().from(schema.seasonObjectives),
+      ).toEqual(objectivesBefore);
+      const loaded = await loadCareer(testDb);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.seasonObjectives).toHaveLength(1);
     });
   });
 
@@ -1531,6 +1694,181 @@ describe('Career Persistence (Real SQLite)', () => {
       ]);
       // Date preserved exactly.
       expect(loaded!.league.fixtures[0].date.getTime()).toBe(base + 1 * day);
+    });
+  });
+
+  describe('season objective persistence', () => {
+    it('round-trips unsettled objectives with exact null fields', async () => {
+      const state = buildState();
+      state.seasonObjectives = [
+        makeObjective({ clubId: state.clubs[0].id }),
+        makeObjective({
+          clubId: state.clubs[1].id,
+          targetPosition: 10,
+          rewardAmount: 900_000,
+          ambition: 'mid_table',
+        }),
+      ];
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.seasonObjectives).toHaveLength(2);
+      expect(loaded!.seasonObjectives).toEqual(state.seasonObjectives);
+      for (const objective of loaded!.seasonObjectives) {
+        expect(objective.objectiveMet).toBeNull();
+        expect(objective.debtRemaining).toBeNull();
+        expect(objective.settledAt).toBeNull();
+        expect(objective.rewardPaid).toBe(0);
+        expect(objective.sanction).toBe('none');
+      }
+    });
+
+    it('round-trips settled objectives preserving every field exactly', async () => {
+      const state = buildState();
+      const settledAt = new Date('2025-05-24T18:30:00.000Z');
+      state.seasonObjectives = [
+        makeObjective({
+          clubId: state.clubs[0].id,
+          objectiveMet: true,
+          rewardPaid: 2_500_000,
+          debtRemaining: 0,
+          settledAt,
+          sanction: 'none',
+        }),
+        makeObjective({
+          clubId: state.clubs[1].id,
+          targetPosition: 14,
+          rewardAmount: 700_000,
+          ambition: 'survival',
+          objectiveMet: false,
+          rewardPaid: 0,
+          debtRemaining: 1_234_567,
+          settledAt,
+          sanction: 'dismissal_relegation_pending',
+        }),
+      ];
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.seasonObjectives).toHaveLength(2);
+      const [met, missed] = [...loaded!.seasonObjectives].sort((a, b) =>
+        a.clubId < b.clubId ? -1 : 1,
+      );
+      expect(met.objectiveMet).toBe(true);
+      expect(met.rewardPaid).toBe(2_500_000);
+      expect(met.debtRemaining).toBe(0);
+      expect(met.settledAt!.getTime()).toBe(settledAt.getTime());
+      expect(met.sanction).toBe('none');
+      expect(missed.objectiveMet).toBe(false);
+      expect(missed.rewardPaid).toBe(0);
+      expect(missed.debtRemaining).toBe(1_234_567);
+      expect(missed.settledAt!.getTime()).toBe(settledAt.getTime());
+      expect(missed.sanction).toBe('dismissal_relegation_pending');
+      expect(missed.ambition).toBe('survival');
+    });
+
+    it('preserves objectives from multiple seasons simultaneously', async () => {
+      const state = buildState();
+      state.seasonObjectives = [
+        makeObjective({ seasonId: 'season-1', clubId: state.clubs[0].id }),
+        makeObjective({
+          seasonId: 'season-1',
+          clubId: state.clubs[1].id,
+          ambition: 'mid_table',
+        }),
+        makeObjective({
+          seasonId: 'season-2',
+          clubId: state.clubs[0].id,
+          objectiveMet: true,
+          rewardPaid: 2_500_000,
+          debtRemaining: 0,
+          settledAt: new Date('2026-05-24T00:00:00.000Z'),
+        }),
+      ];
+
+      await saveCareer(state, testDb);
+      const loaded = await loadCareer(testDb);
+
+      expect(loaded!.seasonObjectives).toHaveLength(3);
+      expect(
+        loaded!.seasonObjectives.filter((o) => o.seasonId === 'season-1'),
+      ).toHaveLength(2);
+      expect(
+        loaded!.seasonObjectives.filter((o) => o.seasonId === 'season-2'),
+      ).toHaveLength(1);
+      // Deterministic order: season_id then club_id.
+      expect(loaded!.seasonObjectives.map((o) => o.seasonId)).toEqual([
+        'season-1',
+        'season-1',
+        'season-2',
+      ]);
+    });
+
+    it('does not duplicate objectives across repeated save/load cycles', async () => {
+      const state = buildState();
+      state.seasonObjectives = [
+        makeObjective({ clubId: state.clubs[0].id }),
+        makeObjective({ clubId: state.clubs[1].id, ambition: 'mid_table' }),
+      ];
+
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await saveCareer(state, testDb);
+        const loaded = await loadCareer(testDb);
+        expect(loaded!.seasonObjectives).toHaveLength(2);
+        await saveCareer(loaded!, testDb);
+      }
+
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.seasonObjectives).toHaveLength(2);
+      const rows = await testDb.select().from(schema.seasonObjectives);
+      expect(rows).toHaveLength(2);
+    });
+
+    it('loads a career saved without objectives as an empty array', async () => {
+      const state = buildState();
+      state.seasonObjectives = [];
+      await saveCareer(state, testDb);
+      // Simulate a career persisted before objectives existed: the table
+      // is simply empty.
+      const loaded = await loadCareer(testDb);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.seasonObjectives).toEqual([]);
+    });
+
+    it('rolls back the whole save when an objective insert fails', async () => {
+      const state = buildState();
+      state.seasonObjectives = [makeObjective({ clubId: state.clubs[0].id })];
+      await saveCareer(state, testDb);
+      const before = await loadCareer(testDb);
+      const snapshotBefore = {
+        clubs: await testDb.select().from(schema.clubs),
+        players: await testDb.select().from(schema.players),
+        seasonObjectives: await testDb.select().from(schema.seasonObjectives),
+      };
+
+      // Duplicate (season_id, club_id) violates the composite primary
+      // key mid-transaction: every preceding write must be rolled back.
+      const corrupted = {
+        ...state,
+        career: { ...state.career, managerName: 'Corrupted Manager' },
+        seasonObjectives: [
+          makeObjective({ clubId: state.clubs[0].id }),
+          makeObjective({ clubId: state.clubs[0].id, ambition: 'mid_table' }),
+        ],
+      };
+      await expect(saveCareer(corrupted, testDb)).rejects.toThrow();
+
+      const snapshotAfter = {
+        clubs: await testDb.select().from(schema.clubs),
+        players: await testDb.select().from(schema.players),
+        seasonObjectives: await testDb.select().from(schema.seasonObjectives),
+      };
+      expect(snapshotAfter).toEqual(snapshotBefore);
+      const loaded = await loadCareer(testDb);
+      expect(loaded!.career.managerName).toBe(before!.career.managerName);
+      expect(loaded!.seasonObjectives).toHaveLength(1);
     });
   });
 });

@@ -1,11 +1,18 @@
 import type { CareerState } from '../db/careerPersistence';
-import type { TransferOffer } from '@club-director/shared-types';
+import type { TransferOffer, TransferRecord } from '@club-director/shared-types';
 import type { PersistedMatch } from '../db/matchRecords';
+import {
+  assignSeasonObjectives,
+  generateFixtures,
+  generateSeedData,
+  scheduledFixturesToLeagueFixtures,
+} from '@club-director/engine';
 
 // Mock the database layer so the boot flow can be tested without expo-sqlite.
 jest.mock('../db', () => ({
   initializeDatabase: jest.fn().mockResolvedValue(undefined),
   loadCareer: jest.fn(),
+  saveCareer: jest.fn().mockResolvedValue(undefined),
 }));
 
 function buildLoadedCareer(transferOffers: TransferOffer[]): CareerState {
@@ -31,7 +38,9 @@ function buildLoadedCareer(transferOffers: TransferOffer[]): CareerState {
     season: {
       id: 's1',
       leagueId: 'l1',
-      currentWeek: 1,
+      // Week 2 keeps ensureSeasonObjectives on the 'blocked' path —
+      // these fixtures exercise boot mechanics, not objective recovery.
+      currentWeek: 2,
       currentDate: new Date('2024-08-01'),
       transferWindowOpen: true,
       fixturesCalendar: [],
@@ -39,6 +48,7 @@ function buildLoadedCareer(transferOffers: TransferOffer[]): CareerState {
     transferHistory: [],
     transferOffers,
     matches: [],
+    seasonObjectives: [],
   };
 }
 
@@ -56,6 +66,57 @@ async function freshBoot() {
     getStore: () => useGameState.getState(),
     mockLoadCareer: db.loadCareer as jest.Mock,
     mockInitDatabase: db.initializeDatabase as jest.Mock,
+    mockSaveCareer: db.saveCareer as jest.Mock,
+  };
+}
+
+/**
+ * A structurally valid 16-club career whose current season is provably
+ * untouched — the only shape ensureSeasonObjectives can recover.
+ */
+function buildRecoverableCareer(
+  overrides: Partial<CareerState> = {},
+): CareerState {
+  const seedData = generateSeedData(7);
+  const clubs = seedData.clubs;
+  const players = seedData.players.filter((p) =>
+    clubs.some((c) => c.squad.includes(p.id)),
+  );
+  const fixtures = scheduledFixturesToLeagueFixtures(
+    generateFixtures(clubs.map((c) => c.id), new Date('2024-08-01')),
+  );
+  return {
+    career: {
+      id: 'active',
+      managerName: 'Legacy Manager',
+      managedClubId: clubs[0].id,
+      createdAt: new Date('2024-08-01'),
+      lastPlayedAt: new Date(),
+      schemaVersion: 1,
+    },
+    clubs,
+    players,
+    league: {
+      id: 'l1',
+      name: 'Legacy League',
+      tier: 1,
+      clubIds: clubs.map((c) => c.id),
+      standings: { entries: [] },
+      fixtures,
+    },
+    season: {
+      id: 'season-1',
+      leagueId: 'l1',
+      currentWeek: 1,
+      currentDate: new Date('2024-08-01'),
+      transferWindowOpen: true,
+      fixturesCalendar: [],
+    },
+    transferHistory: [],
+    transferOffers: [],
+    matches: [],
+    seasonObjectives: [],
+    ...overrides,
   };
 }
 
@@ -251,5 +312,160 @@ describe('ensureCareerBoot', () => {
     expect(result).toBe('error');
     // loadCareer must never run against an uninitialized database.
     expect(mockLoadCareer).not.toHaveBeenCalled();
+  });
+
+  describe('season objective recovery', () => {
+    it('recovers and persists objectives for an untouched legacy career', async () => {
+      const { ensureCareerBoot, getStore, mockLoadCareer, mockSaveCareer } =
+        await freshBoot();
+      mockLoadCareer.mockResolvedValue(buildRecoverableCareer());
+
+      const result = await ensureCareerBoot();
+      const store = getStore();
+
+      expect(result).toBe('loaded');
+      // The recovered state was persisted BEFORE publication.
+      expect(mockSaveCareer).toHaveBeenCalledTimes(1);
+      const saved = mockSaveCareer.mock.calls[0][0] as CareerState;
+      expect(saved.seasonObjectives).toHaveLength(16);
+      expect(
+        saved.seasonObjectives.every((o) => o.seasonId === 'season-1'),
+      ).toBe(true);
+      expect(store.seasonObjectives).toHaveLength(16);
+      expect(store.bootStatus).toBe('loaded');
+    });
+
+    it('preserves historical objectives during recovery', async () => {
+      const { ensureCareerBoot, mockLoadCareer, mockSaveCareer } =
+        await freshBoot();
+      const base = buildRecoverableCareer();
+      const history = base.clubs.slice(0, 3).map((c) => ({
+        seasonId: 'season-0',
+        clubId: c.id,
+        targetPosition: 8,
+        rewardAmount: 1_000_000,
+        ambition: 'mid_table' as const,
+        objectiveMet: true,
+        rewardPaid: 1_000_000,
+        debtRemaining: 0,
+        settledAt: new Date('2024-06-01T00:00:00Z'),
+        sanction: 'none' as const,
+      }));
+      mockLoadCareer.mockResolvedValue(
+        buildRecoverableCareer({ seasonObjectives: history }),
+      );
+
+      await ensureCareerBoot();
+
+      const saved = mockSaveCareer.mock.calls[0][0] as CareerState;
+      expect(saved.seasonObjectives).toHaveLength(19);
+      expect(saved.seasonObjectives.slice(0, 3)).toEqual(history);
+    });
+
+    it('does not save again when objectives are already complete', async () => {
+      const { ensureCareerBoot, mockLoadCareer, mockSaveCareer } =
+        await freshBoot();
+      const base = buildRecoverableCareer();
+      const objectives = assignSeasonObjectives({
+        seasonId: 'season-1',
+        clubs: base.clubs,
+        players: base.players,
+        seasonWeeks: 30,
+      });
+      mockLoadCareer.mockResolvedValue(
+        buildRecoverableCareer({ seasonObjectives: objectives }),
+      );
+
+      const result = await ensureCareerBoot();
+
+      expect(result).toBe('loaded');
+      expect(mockSaveCareer).not.toHaveBeenCalled();
+    });
+
+    it('boots normally without mutation when recovery is blocked', async () => {
+      const { ensureCareerBoot, getStore, mockLoadCareer, mockSaveCareer } =
+        await freshBoot();
+      const transfer: TransferRecord = {
+        id: 'transfer-1',
+        playerId: 'p-x',
+        fromClubId: 'club-a',
+        toClubId: 'club-b',
+        fee: 100_000,
+        date: new Date('2024-08-05T00:00:00Z'),
+      };
+      mockLoadCareer.mockResolvedValue(
+        buildRecoverableCareer({ transferHistory: [transfer] }),
+      );
+
+      const result = await ensureCareerBoot();
+
+      expect(result).toBe('loaded');
+      expect(mockSaveCareer).not.toHaveBeenCalled();
+      expect(getStore().seasonObjectives).toEqual([]);
+    });
+
+    it('boots normally without mutation when objectives are corrupt', async () => {
+      const { ensureCareerBoot, mockLoadCareer, mockSaveCareer } =
+        await freshBoot();
+      const base = buildRecoverableCareer();
+      const partial = assignSeasonObjectives({
+        seasonId: 'season-1',
+        clubs: base.clubs,
+        players: base.players,
+        seasonWeeks: 30,
+      }).slice(0, 10);
+      mockLoadCareer.mockResolvedValue(
+        buildRecoverableCareer({ seasonObjectives: partial }),
+      );
+
+      const result = await ensureCareerBoot();
+
+      expect(result).toBe('loaded');
+      expect(mockSaveCareer).not.toHaveBeenCalled();
+    });
+
+    it('persists before publishing: no setter runs before saveCareer resolves', async () => {
+      const { ensureCareerBoot, getStore, mockLoadCareer, mockSaveCareer } =
+        await freshBoot();
+      mockLoadCareer.mockResolvedValue(buildRecoverableCareer());
+      // Snapshot the store at the moment saveCareer is invoked: nothing
+      // may have been published yet.
+      let storeAtSaveTime: {
+        league: unknown;
+        seasonObjectives: unknown;
+      } | null = null;
+      mockSaveCareer.mockImplementation(() => {
+        const s = getStore();
+        storeAtSaveTime = {
+          league: s.league,
+          seasonObjectives: s.seasonObjectives,
+        };
+        return Promise.resolve();
+      });
+
+      await ensureCareerBoot();
+
+      expect(storeAtSaveTime).not.toBeNull();
+      expect(storeAtSaveTime!.league).toBeNull();
+      expect(storeAtSaveTime!.seasonObjectives).toEqual([]);
+      // Publication still happens afterwards.
+      expect(getStore().seasonObjectives).toHaveLength(16);
+    });
+
+    it('reports error and publishes nothing when the recovery save fails', async () => {
+      const { ensureCareerBoot, getStore, mockLoadCareer, mockSaveCareer } =
+        await freshBoot();
+      mockLoadCareer.mockResolvedValue(buildRecoverableCareer());
+      mockSaveCareer.mockRejectedValue(new Error('disk full'));
+
+      const result = await ensureCareerBoot();
+      const store = getStore();
+
+      expect(result).toBe('error');
+      expect(store.bootStatus).toBe('error');
+      // The recovered objectives were never published.
+      expect(store.seasonObjectives).toEqual([]);
+      expect(store.league).toBeNull();
+    });
   });
 });

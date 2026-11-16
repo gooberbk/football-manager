@@ -500,6 +500,7 @@ describe('career save/load after a transfer', () => {
         season,
         transferHistory: result.transferHistory!,
         transferOffers: [],
+        seasonObjectives: [],
       },
       testDb,
     );

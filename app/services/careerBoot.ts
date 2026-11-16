@@ -1,4 +1,5 @@
-import { initializeDatabase, loadCareer } from '../db';
+import { initializeDatabase, loadCareer, saveCareer } from '../db';
+import { ensureSeasonObjectives } from './seasonObjectiveInit';
 import { useGameState } from '../store/useGameState';
 
 /**
@@ -32,14 +33,24 @@ export function ensureCareerBoot(): Promise<CareerBootResult> {
         const careerState = await loadCareer();
 
         if (careerState) {
-          store.setLeague(careerState.league);
-          store.setSeason(careerState.season);
-          store.setClubs(careerState.clubs);
-          store.setPlayers(careerState.players);
-          store.setTransferHistory(careerState.transferHistory);
-          store.setTransferOffers(careerState.transferOffers ?? []);
-          store.setMatches(careerState.matches ?? []);
-          store.setManagedClubId(careerState.career.managedClubId);
+          // Recover season objectives only when the current season is
+          // provably untouched; 'blocked'/'corrupt' careers boot normally
+          // and the rollover still fails explicitly at settlement.
+          // A 'recovered' state is persisted BEFORE any publication.
+          const ensured = ensureSeasonObjectives(careerState);
+          if (ensured.action === 'recovered') {
+            await saveCareer(ensured.state);
+          }
+          const bootstrapped = ensured.state;
+          store.setLeague(bootstrapped.league);
+          store.setSeason(bootstrapped.season);
+          store.setClubs(bootstrapped.clubs);
+          store.setPlayers(bootstrapped.players);
+          store.setTransferHistory(bootstrapped.transferHistory);
+          store.setTransferOffers(bootstrapped.transferOffers ?? []);
+          store.setMatches(bootstrapped.matches ?? []);
+          store.setSeasonObjectives(bootstrapped.seasonObjectives ?? []);
+          store.setManagedClubId(bootstrapped.career.managedClubId);
           result = 'loaded';
         } else {
           result = 'empty';

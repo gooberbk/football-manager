@@ -538,6 +538,9 @@ function findSuitablePlayer(
   const availablePlayers = players.filter(
     (p) =>
       p.primaryPosition === targetPosition &&
+      // Free agents (clubId null) have no selling club and are never
+      // AI transfer targets.
+      p.contract.clubId !== null &&
       p.contract.clubId !== buyingClub.id &&
       calculateMarketValue(p, now) <= budget,
   );

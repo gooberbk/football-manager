@@ -56,7 +56,7 @@ export class SeededRNG {
   }
 }
 
-interface TeamStrength {
+export interface TeamStrength {
   attackRating: number;
   midfieldRating: number;
   defenseRating: number;
@@ -98,8 +98,8 @@ export function simulateMatch(
   const actualSeed = seed ?? Math.floor(Math.random() * 4294967296);
   const rng = new SeededRNG(actualSeed);
 
-  const homeStrength = calculateTeamStrength(homeClub, homePlayers, rng);
-  const awayStrength = calculateTeamStrength(awayClub, awayPlayers, rng);
+  const homeStrength = calculateTeamStrength(homeClub, homePlayers);
+  const awayStrength = calculateTeamStrength(awayClub, awayPlayers);
 
   // Apply moderate home advantage
   homeStrength.attackRating *= 1.15;
@@ -132,8 +132,8 @@ export function simulateMatch(
   return result;
 }
 
-function calculateTeamStrength(club: Club, players: PlayerMap, rng: SeededRNG): TeamStrength {
-  const squadPlayers = club.squad.map((id) => players[id]).filter((p) => p !== undefined);
+function calculateTeamStrength(club: Club, players: PlayerMap): TeamStrength {
+  const squadPlayers = getSquadPlayers(club, players);
 
   if (squadPlayers.length === 0) {
     return {
@@ -242,15 +242,24 @@ function applyTacticalModifiers(strength: TeamStrength, tactics: ClubTactics): v
   strength.defenseRating *= fitnessModifier * moraleModifier;
 }
 
-function selectStartingXI(club: Club, players: PlayerMap, formation: Formation): StartingXI {
-  const squadPlayers = club.squad.map((id) => players[id]).filter((p) => p !== undefined);
+function getSquadPlayers(club: Club, players: PlayerMap): Player[] {
+  return club.squad
+    .map((id) => players[id])
+    .filter((p): p is Player => p !== undefined);
+}
 
+function getEligiblePlayers(squadPlayers: readonly Player[]): Player[] {
   // Players with an active injury are unavailable and must never be
   // selected, not even as a fallback. Selection proceeds from the eligible
   // pool only; a squad that cannot field 11 eligible players fails loudly.
-  const eligiblePlayers = squadPlayers.filter(
+  return squadPlayers.filter(
     (p) => !p.status.injury || p.status.injury.daysRemaining <= 0,
   );
+}
+
+function selectStartingXI(club: Club, players: PlayerMap, formation: Formation): StartingXI {
+  const squadPlayers = getSquadPlayers(club, players);
+  const eligiblePlayers = getEligiblePlayers(squadPlayers);
 
   if (eligiblePlayers.length < 11) {
     throw new Error(
@@ -359,6 +368,94 @@ function selectStartingXI(club: Club, players: PlayerMap, formation: Formation):
     midfielders,
     forwards,
   };
+}
+
+/**
+ * Result of previewing the engine's automatic starting-XI selection.
+ * `ok: false` carries a machine-readable reason instead of throwing, so
+ * callers (e.g. the Tactics screen) can render a warning without an
+ * exception. `reason` distinguishes a squad that cannot field 11 eligible
+ * players from a selection that failed the engine's structural checks
+ * (missing goalkeeper/defenders/attackers) — the same failures
+ * `simulateMatch` would raise.
+ */
+export type StartingXIPreview =
+  | {
+      ok: true;
+      players: Player[];
+      gk: Player;
+      defenders: Player[];
+      midfielders: Player[];
+      forwards: Player[];
+      eligibleCount: number;
+      squadSize: number;
+    }
+  | {
+      ok: false;
+      reason: 'insufficient_players' | 'invalid_selection';
+      eligibleCount: number;
+      squadSize: number;
+      message: string;
+    };
+
+/** Number of squad players eligible for selection (not injured). */
+export function countEligiblePlayers(club: Club, players: PlayerMap): number {
+  return getEligiblePlayers(getSquadPlayers(club, players)).length;
+}
+
+/**
+ * Read-only preview of the XI `simulateMatch` would select for this club
+ * and formation. Uses the exact same `selectStartingXI` code path — no
+ * duplicated selection logic, no RNG, no mutation of inputs. Defaults to
+ * the club's configured formation, matching `simulateMatch`.
+ */
+export function previewStartingXI(
+  club: Club,
+  players: PlayerMap,
+  formation: Formation = club.tactics.defaultFormation,
+): StartingXIPreview {
+  const squadPlayers = getSquadPlayers(club, players);
+  const eligibleCount = getEligiblePlayers(squadPlayers).length;
+  const base = { eligibleCount, squadSize: squadPlayers.length };
+
+  if (eligibleCount < 11) {
+    return {
+      ok: false,
+      reason: 'insufficient_players',
+      ...base,
+      message:
+        `Club ${club.id} cannot field a starting XI: ${eligibleCount} eligible players ` +
+        `(need 11, squad size ${squadPlayers.length})`,
+    };
+  }
+
+  try {
+    const xi = selectStartingXI(club, players, formation);
+    return { ok: true, ...xi, ...base };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'invalid_selection',
+      ...base,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Read-only preview of the collective strength ratings the engine computes
+ * for this club, including tactical modifiers. Home advantage is a
+ * match-context adjustment and is intentionally NOT applied. Deterministic:
+ * `calculateTeamStrength` performs no RNG.
+ */
+export function previewTeamStrength(
+  club: Club,
+  players: PlayerMap,
+  tactics: ClubTactics = club.tactics,
+): TeamStrength {
+  const strength = calculateTeamStrength(club, players);
+  applyTacticalModifiers(strength, tactics);
+  return strength;
 }
 
 function simulatePhases(

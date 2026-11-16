@@ -56,6 +56,42 @@ describe('createCareer', () => {
     expect(saved.transferOffers).toEqual([]);
     expect(saved.transferHistory).toEqual([]);
     expect(saved.league.fixtures.length).toBeGreaterThan(0);
+    // Season objectives are generated at creation: one per club, all
+    // belonging to the initial season, all unsettled.
+    expect(saved.seasonObjectives).toHaveLength(16);
+    expect(
+      saved.seasonObjectives.every(
+        (o) =>
+          o.seasonId === saved.season.id &&
+          o.objectiveMet === null &&
+          o.settledAt === null,
+      ),
+    ).toBe(true);
+    expect(new Set(saved.seasonObjectives.map((o) => o.clubId)).size).toBe(16);
+    expect(getStore().seasonObjectives).toHaveLength(16);
+  });
+
+  it('does not publish to the store before saveCareer resolves', async () => {
+    const { createCareer, getStore, mockSaveCareer } = await freshCreation();
+    getStore().setBootStatus('empty');
+    // Snapshot the store at the moment saveCareer is invoked: the career
+    // must not be visible in the store yet.
+    let publishedAtSaveTime = true;
+    mockSaveCareer.mockImplementation(() => {
+      const s = getStore();
+      publishedAtSaveTime =
+        s.league !== null ||
+        s.seasonObjectives.length > 0 ||
+        s.bootStatus === 'loaded';
+      return Promise.resolve();
+    });
+
+    await createCareer(0);
+
+    expect(publishedAtSaveTime).toBe(false);
+    // Publication still happens after the save resolves.
+    expect(getStore().seasonObjectives).toHaveLength(16);
+    expect(getStore().bootStatus).toBe('loaded');
   });
 
   it('does not mark bootStatus as loaded when saveCareer fails', async () => {

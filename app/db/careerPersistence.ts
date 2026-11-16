@@ -14,6 +14,7 @@ import type {
   Player,
   League,
   Season,
+  SeasonObjective,
   TransferRecord,
   TransferOffer,
   TransferOfferStatus,
@@ -59,6 +60,15 @@ export interface CareerState {
    * with an explicit error rather than silently dropping them.
    */
   matches?: PersistedMatch[];
+  /**
+   * Season objectives for every season of this career — current and
+   * historical. Required: the full collection is always persisted, never
+   * partially, so objectives of past seasons survive every save. Careers
+   * created before objectives existed simply carry an empty array.
+   * Settlement fields (objectiveMet, debtRemaining, settledAt) stay null
+   * until the end-of-season settlement writes them exactly once.
+   */
+  seasonObjectives: SeasonObjective[];
 }
 
 export async function saveCareer(state: CareerState, dbInstance: any): Promise<void> {
@@ -101,6 +111,7 @@ export async function saveCareer(state: CareerState, dbInstance: any): Promise<v
     tx.delete(schema.fixtures).run();
     tx.delete(schema.seasons).run();
     tx.delete(schema.transfers).run();
+    tx.delete(schema.seasonObjectives).run();
 
     // Save clubs
     for (const club of state.clubs) {
@@ -244,6 +255,32 @@ export async function saveCareer(state: CareerState, dbInstance: any): Promise<v
         type: 'transfer',
         date: transfer.date.getTime(),
         status: 'completed',
+      }).run();
+    }
+
+    // Save season objectives — the full collection (all seasons) is
+    // always rewritten inside this transaction, so historical objectives
+    // are preserved exactly as provided and a failed insert rolls back
+    // the whole save.
+    for (const objective of state.seasonObjectives) {
+      tx.insert(schema.seasonObjectives).values({
+        seasonId: objective.seasonId,
+        clubId: objective.clubId,
+        targetPosition: objective.targetPosition,
+        rewardAmount: objective.rewardAmount,
+        ambition: objective.ambition,
+        objectiveMet:
+          objective.objectiveMet === null
+            ? null
+            : objective.objectiveMet
+              ? 1
+              : 0,
+        rewardPaid: objective.rewardPaid,
+        debtRemaining: objective.debtRemaining,
+        settledAt: objective.settledAt
+          ? objective.settledAt.getTime()
+          : null,
+        sanction: objective.sanction,
       }).run();
     }
 
@@ -540,6 +577,40 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
           : undefined,
     }));
 
+    // Load season objectives — every season (current and history), in a
+    // deterministic order. NULL settlement fields map back to null;
+    // objective_met stores 0/1 as integer.
+    const objectiveRecords = await dbInstance
+      .select()
+      .from(schema.seasonObjectives)
+      .orderBy(
+        asc(schema.seasonObjectives.seasonId),
+        asc(schema.seasonObjectives.clubId),
+      );
+    const seasonObjectives: SeasonObjective[] = objectiveRecords.map(
+      (record: any) => ({
+        seasonId: record.seasonId,
+        clubId: record.clubId,
+        targetPosition: record.targetPosition,
+        rewardAmount: record.rewardAmount,
+        ambition: record.ambition,
+        objectiveMet:
+          record.objectiveMet === null || record.objectiveMet === undefined
+            ? null
+            : record.objectiveMet === 1,
+        rewardPaid: record.rewardPaid,
+        debtRemaining:
+          record.debtRemaining === null || record.debtRemaining === undefined
+            ? null
+            : record.debtRemaining,
+        settledAt:
+          record.settledAt !== null && record.settledAt !== undefined
+            ? new Date(record.settledAt)
+            : null,
+        sanction: record.sanction,
+      }),
+    );
+
     // Load match history. Rows written before migration v3 (NULL
     // fixture_id/stats/seed/participant_ids) cannot be represented by
     // PersistedMatch and are filtered out — never backfilled. Matches are
@@ -586,6 +657,7 @@ export async function loadCareer(dbInstance: any): Promise<CareerState | null> {
       transferHistory,
       transferOffers,
       matches,
+      seasonObjectives,
     };
   } catch (error) {
     // Only a missing career row returns null (handled above). Any other
@@ -619,6 +691,7 @@ export async function deleteCareer(dbInstance: any): Promise<void> {
     tx.delete(schema.leagues).run();
     tx.delete(schema.players).run();
     tx.delete(schema.clubs).run();
+    tx.delete(schema.seasonObjectives).run();
     tx.delete(schema.career).run();
   });
 }

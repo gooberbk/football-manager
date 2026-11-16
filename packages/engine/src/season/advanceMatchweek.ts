@@ -14,6 +14,14 @@ import { computeStandings } from './standings';
 import { isSeasonComplete } from './completion';
 import { processAITransferActivity } from '../transfer/market';
 import { applyWeeklyEconomy } from '../economy/weeklyEconomy';
+import { applyWeeklyDevelopment } from '../players/development';
+import {
+  applyWeeklyMorale,
+  buildMatchClubByPlayerId,
+  collectClubsWithNewUnpaidWages,
+  detectInjuryTransitions,
+} from '../players/morale';
+import { processContractExpiry } from './contracts';
 
 export interface MatchweekResult {
   fixtureId: string;
@@ -96,15 +104,46 @@ export function advanceMatchweek(
   if (weekFixtures.length === 0) {
     // No fixtures to play this week, but the matchweek still advances:
     // every club receives its income and pays its wage bill (unpaid
-    // wages accumulate as debt), then the date moves forward.
-    const updatedPlayers = applyNonPlayingEffects(players);
+    // wages accumulate as debt), the date moves forward, and players
+    // still undergo a week of development at the reduced reserve
+    // factor (nobody participated in a match).
+    const postEffects = applyNonPlayingEffects(players);
+    const developedPlayers = applyWeeklyDevelopment(
+      postEffects,
+      new Set<string>(),
+      season.id,
+      currentWeek,
+    );
+    // Contract expiry runs before the economy so an expired player is
+    // already out of every squad and generates no wage this week — the
+    // same rule as the match path. Reference date: season.currentDate.
+    const contractExpiry = processContractExpiry(
+      developedPlayers,
+      clubs,
+      season.currentDate,
+    );
+    const economyClubs = applyWeeklyEconomy(contractExpiry.clubs, contractExpiry.players);
+    // Morale runs once per week on the final state: no matches were
+    // played, but injuries may have healed and new unpaid wages still
+    // apply. The unpaid-wage baseline is the post-expiry clubs (no
+    // transfer processing happens on bye weeks; expiry does not touch
+    // finances, so debt values are identical to the input clubs).
+    const moralePlayers = applyWeeklyMorale(contractExpiry.players, {
+      matchClubByPlayerId: buildMatchClubByPlayerId(clubs),
+      matches: [],
+      injuries: detectInjuryTransitions(players, postEffects),
+      clubsWithUnpaidWages: collectClubsWithNewUnpaidWages(
+        contractExpiry.clubs,
+        economyClubs,
+      ),
+    });
     const updatedSeason = advanceSeasonDate(season);
     return {
       results: [],
       updatedLeague: league,
       updatedSeason,
-      updatedPlayers,
-      updatedClubs: applyWeeklyEconomy(clubs, updatedPlayers),
+      updatedPlayers: moralePlayers,
+      updatedClubs: economyClubs,
       transferOffers: [],
       transferRecords: [],
       seasonComplete: false,
@@ -207,16 +246,51 @@ export function advanceMatchweek(
   const transferNow = new Date(season.currentDate);
 
   // Apply post-match effects to players — scoped to actual participants.
-  const updatedPlayers = applyPostMatchEffects(players, results, effectsRng);
+  const postMatchPlayers = applyPostMatchEffects(players, results, effectsRng);
+
+  // Morale context captured BEFORE transfer processing: the
+  // player→club snapshot reflects match-time squads, so a player who
+  // played for club A and is transferred to club B this same week still
+  // receives A's result. Injury transitions are detected between the
+  // input players and the post-match state.
+  const matchClubByPlayerId = buildMatchClubByPlayerId(clubs);
+  const injuryEvents = detectInjuryTransitions(players, postMatchPlayers);
+
+  // Weekly development runs after post-match effects (it sees the final
+  // fitness/injury state) and before AI transfers/economy so downstream
+  // systems observe developed players. Participation is the union of
+  // every simulated match's participantIds — a Set, so a player can
+  // never be counted twice.
+  const participantIds = new Set<string>();
+  results.forEach((matchResult) => {
+    matchResult.result.participantIds.forEach((id) => participantIds.add(id));
+  });
+  const updatedPlayers = applyWeeklyDevelopment(
+    postMatchPlayers,
+    participantIds,
+    season.id,
+    currentWeek,
+  );
+
+  // Contract expiry runs after development and before AI transfers and
+  // the economy: an expiring player is already a free agent (clubId
+  // null, removed from every squad), so AI transfers cannot sell them
+  // this week and the wage bill excludes them — reference date is
+  // season.currentDate, the same date transfers and valuations use.
+  const contractExpiry = processContractExpiry(
+    updatedPlayers,
+    clubs,
+    season.currentDate,
+  );
 
   // Process AI transfer activity on a copy of the clubs array (the engine
   // mutates it in place for accepted transfers), so callers' arrays are not
   // modified outside of the returned state.
-  const transferClubs = [...clubs];
+  const transferClubs = [...contractExpiry.clubs];
   const transferRecords: TransferRecord[] = [];
   const transferOffers = processAITransferActivity(
     transferClubs,
-    updatedPlayers,
+    contractExpiry.players,
     [],
     season.transferWindowOpen,
     options?.managedClubId ? [options.managedClubId] : [],
@@ -228,7 +302,27 @@ export function advanceMatchweek(
   // the post-transfer squads, and before the date advance. Every club —
   // managed and AI — receives its fixed income and pays its wage bill;
   // unpaid wages accumulate as debt. No RNG is consumed.
-  const economyClubs = applyWeeklyEconomy(transferClubs, updatedPlayers);
+  const economyClubs = applyWeeklyEconomy(transferClubs, contractExpiry.players);
+
+  // Morale runs once, after transfers and economy, so it sees the final
+  // weekly events: match results (via the pre-transfer snapshot), injury
+  // transitions, and NEW unpaid wages only (debt delta across the
+  // economy — historical debt never retriggers the penalty).
+  const moralePlayers = applyWeeklyMorale(contractExpiry.players, {
+    matchClubByPlayerId,
+    matches: results.map((matchResult) => ({
+      homeClubId: matchResult.homeClubId,
+      awayClubId: matchResult.awayClubId,
+      homeScore: matchResult.result.homeScore,
+      awayScore: matchResult.result.awayScore,
+      participantIds: matchResult.result.participantIds,
+    })),
+    injuries: injuryEvents,
+    clubsWithUnpaidWages: collectClubsWithNewUnpaidWages(
+      transferClubs,
+      economyClubs,
+    ),
+  });
 
   // Advance season
   const updatedSeason = advanceSeasonDate(season);
@@ -237,7 +331,7 @@ export function advanceMatchweek(
     results,
     updatedLeague,
     updatedSeason,
-    updatedPlayers,
+    updatedPlayers: moralePlayers,
     updatedClubs: economyClubs,
     transferOffers,
     transferRecords,

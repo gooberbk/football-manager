@@ -124,7 +124,9 @@ export default function TransfersScreen() {
     );
   }
 
-  const availablePlayers = players.filter((p) => p.contract.clubId !== managedClubId);
+  const availablePlayers = players.filter(
+    (p) => p.contract.clubId !== null && p.contract.clubId !== managedClubId,
+  );
   const managedClub = clubs.find((c) => c.id === managedClubId);
 
   return (
